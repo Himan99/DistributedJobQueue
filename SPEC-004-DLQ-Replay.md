@@ -2,7 +2,7 @@
 
 **ID:** SPEC-004  
 **Title:** Dead-lettered job replay endpoint  
-**Status:** Not started  
+**Status:** Implemented  
 **Type:** New API endpoint + persistence method  
 **Architecture ref:** Section 3 — `POST /jobs/{id}/replay`
 

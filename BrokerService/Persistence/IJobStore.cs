@@ -11,5 +11,6 @@ namespace DistributedJobQueue.Core.Persistence
         Task<Guid> Nack(Guid jobId, string workerId, string error);
         Task<Job?> GetJob(Guid id);
         Task<List<Job>> ListJobs(string? status, string? type);
+        Task Replay(Guid jobId);
     }
 }

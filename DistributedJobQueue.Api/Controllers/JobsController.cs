@@ -130,6 +130,26 @@ namespace DistributedJobQueueBrokerService.Controllers
             }
         }
 
+        // POST api/jobs/{id}/replay
+        [HttpPost("{id}/replay")]
+        public async Task<ActionResult> ReplayJob(Guid id)
+        {
+            try
+            {
+                var job = await _jobStore.GetJob(id);
+                if (job == null) return NotFound();
+                if (job.Status != JobStatus.DeadLettered)
+                    return BadRequest("Job is not in dead_lettered status.");
+
+                await _jobStore.Replay(id);
+                return Ok(id);
+            }
+            catch (Exception ex)
+            {
+                return Problem(detail: ex.Message);
+            }
+        }
+
         // --- Request DTOs used by the controller ---
         public record LeaseRequest(string WorkerId, List<string>? AllowedTypes, int LeaseSeconds = 30);
         public record AckRequest(Guid JobId, string WorkerId, string ResultUrl);

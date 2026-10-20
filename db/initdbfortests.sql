@@ -1,0 +1,7 @@
+
+
+delete  from jobs
+
+
+
+

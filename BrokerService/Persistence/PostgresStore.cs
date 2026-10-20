@@ -224,6 +224,43 @@ namespace DistributedJobQueue.Core.Persistence
             }, "ListJobs");
         }
 
+        public async Task Replay(Guid jobId)
+        {
+            const string sql = @"
+            UPDATE jobs
+            SET status = @QueuedStatus,
+                attempts = 0,
+                last_error = NULL,
+                leased_by = NULL,
+                lease_expires_at = NULL,
+                run_after = NULL
+            WHERE id = @JobId
+              AND status = @DeadLetteredStatus
+            RETURNING id;";
+
+            var parameters = new
+            {
+                JobId = jobId,
+                QueuedStatus = JobStatus.Queued.ToString(),
+                DeadLetteredStatus = JobStatus.DeadLettered.ToString()
+            };
+
+            await WithDbHandlingAsync<int>(async conn =>
+            {
+                var result = await conn.ExecuteAsync(sql, parameters);
+                if (result == 0)
+                {
+                    var exists = await conn.ExecuteScalarAsync<int?>(
+                        "SELECT COUNT(*) FROM jobs WHERE id = @Id",
+                        new { Id = jobId });
+                    if (exists == 0)
+                        throw new JobPersistenceException($"Job {jobId} not found");
+                    throw new JobPersistenceException($"Job {jobId} is not in dead_lettered status");
+                }
+                return result;
+            }, "Replay");
+        }
+
         public async Task<Guid> Save(NewJobRequest request)
         {
             const string sql = @"
