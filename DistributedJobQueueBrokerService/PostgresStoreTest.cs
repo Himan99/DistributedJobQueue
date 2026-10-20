@@ -9,10 +9,12 @@ namespace DistributedJobQueueConsoleTester
     {
         readonly IJobStore postgresStore;
         readonly Random random;
-        public PostgresStoreTest(IJobStore jobStore) 
+        readonly IHostApplicationLifetime lifetime;
+        public PostgresStoreTest(IJobStore jobStore, IHostApplicationLifetime hostLifetime)
         {
             postgresStore = jobStore;
             random = new Random();
+            lifetime = hostLifetime;
         }
 
         public async Task StartAsync(CancellationToken cancellationToken)
@@ -35,7 +37,7 @@ namespace DistributedJobQueueConsoleTester
 
             await RunAllTests();
 
-            return;
+            lifetime.StopApplication();
         }
 
         public async Task RunAllTests()
