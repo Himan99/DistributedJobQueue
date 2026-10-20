@@ -52,6 +52,12 @@ namespace DistributedJobQueueConsoleTester
                 ("ConcurrentLeaseNoDuplicatesTest", ConcurrentLeaseNoDuplicatesTest),
                 ("IdempotencyKeyDedupeTest", IdempotencyKeyDedupeTest),
                 ("HeartbeatExtendsLeaseTest", HeartbeatExtendsLeaseTest),
+    ("GetJobReturnsExistingJobTest", GetJobReturnsExistingJobTest),
+    ("GetJobReturnsNullForMissingTest", GetJobReturnsNullForMissingTest),
+    ("ListJobsFiltersByStatusTest", ListJobsFiltersByStatusTest),
+    ("ListJobsFiltersByTypeTest", ListJobsFiltersByTypeTest),
+    ("ReplayDeadLetterJobTest", ReplayDeadLetterJobTest),
+    ("ReplayNonDeadLetterJobFailsTest", ReplayNonDeadLetterJobFailsTest),
             };
 
             int passed = 0, failed = 0;
@@ -285,6 +291,112 @@ namespace DistributedJobQueueConsoleTester
                 Console.WriteLine("No Jobs available");
             }
             return res;
+        }
+
+        // 11. GetJob returns existing job with all fields
+        private async Task GetJobReturnsExistingJobTest()
+        {
+            var type = UniqueType("get_job");
+            var jobId = await postgresStore.Save(new NewJobRequest(type, "{\"key\":\"value\"}", MaxRetries: 3, Priority: 5));
+
+            var job = await postgresStore.GetJob(jobId);
+            Debug.Assert(job != null, "GetJob returned null for existing job");
+            Debug.Assert(job.JobId == jobId, "GetJob returned wrong job id");
+            Debug.Assert(job.Type == type, "GetJob returned wrong type");
+            Debug.Assert(job.Status == JobStatus.Queued, "GetJob returned wrong status");
+            Debug.Assert(job.Attempts == 0, "GetJob returned wrong attempts");
+            Debug.Assert(job.Priority == 5, "GetJob returned wrong priority");
+        }
+
+        // 12. GetJob returns null for missing job
+        private async Task GetJobReturnsNullForMissingTest()
+        {
+            var job = await postgresStore.GetJob(Guid.NewGuid());
+            Debug.Assert(job == null, "GetJob returned non-null for missing job");
+        }
+
+        // 13. ListJobs filters by status
+        private async Task ListJobsFiltersByStatusTest()
+        {
+            var type = UniqueType("list_status");
+            var job1 = await postgresStore.Save(new NewJobRequest(type, "{}", MaxRetries: 1));
+            var job2 = await postgresStore.Save(new NewJobRequest(type, "{}", MaxRetries: 1));
+
+            // Lease and nack job1 to dead-letter it (attempts 1 >= max_retries 1)
+            var leased = await postgresStore.Lease("worker-A", new List<string> { type }, TimeSpan.FromSeconds(30));
+            Debug.Assert(leased != null);
+            await postgresStore.Nack(job1, "worker-A", "failure");
+
+            var queuedJobs = await postgresStore.ListJobs(JobStatus.Queued.ToString(), null);
+            var deadLetterJobs = await postgresStore.ListJobs(JobStatus.DeadLettered.ToString(), null);
+
+            Debug.Assert(queuedJobs.Any(j => j.JobId == job2), "Queued list should contain job2");
+            Debug.Assert(deadLetterJobs.Any(j => j.JobId == job1), "Dead-lettered list should contain job1");
+        }
+
+        // 14. ListJobs filters by type
+        private async Task ListJobsFiltersByTypeTest()
+        {
+            var type1 = UniqueType("list_type_a");
+            var type2 = UniqueType("list_type_b");
+            await postgresStore.Save(new NewJobRequest(type1, "{}"));
+            await postgresStore.Save(new NewJobRequest(type2, "{}"));
+
+            var type1Jobs = await postgresStore.ListJobs(null, type1);
+            var type2Jobs = await postgresStore.ListJobs(null, type2);
+
+            Debug.Assert(type1Jobs.All(j => j.Type == type1), "Type filter should only return type1 jobs");
+            Debug.Assert(type2Jobs.All(j => j.Type == type2), "Type filter should only return type2 jobs");
+            Debug.Assert(type1Jobs.Count == 1, "Should have exactly 1 type1 job");
+            Debug.Assert(type2Jobs.Count == 1, "Should have exactly 1 type2 job");
+        }
+
+        // 15. Replay resets dead-lettered job to queued
+        private async Task ReplayDeadLetterJobTest()
+        {
+            var type = UniqueType("replay");
+            var jobId = await postgresStore.Save(new NewJobRequest(type, "{}", MaxRetries: 1));
+
+            // Lease and nack to dead-letter
+            var leased = await postgresStore.Lease("worker-A", new List<string> { type }, TimeSpan.FromSeconds(30));
+            Debug.Assert(leased != null);
+            await postgresStore.Nack(jobId, "worker-A", "failure"); // attempts=1 >= max_retries=1 → dead_lettered
+
+            // Verify it's dead-lettered
+            var deadLetterJob = await postgresStore.GetJob(jobId);
+            Debug.Assert(deadLetterJob != null, "GetJob returned null for dead-lettered job");
+            Debug.Assert(deadLetterJob!.Status == JobStatus.DeadLettered, "Job should be dead-lettered");
+
+            // Replay
+            await postgresStore.Replay(jobId);
+
+            // Verify it's back to queued with reset fields
+            var replayedJob = await postgresStore.GetJob(jobId);
+            Debug.Assert(replayedJob != null, "GetJob returned null for replayed job");
+            Debug.Assert(replayedJob!.Status == JobStatus.Queued, "Replayed job should be queued");
+            Debug.Assert(replayedJob.Attempts == 0, "Replayed job should have attempts=0");
+            Debug.Assert(replayedJob.LastError == null, "Replayed job should have no last_error");
+            Debug.Assert(replayedJob.LeasedBy == null, "Replayed job should have no leased_by");
+            Debug.Assert(replayedJob.LeaseExpiresAt == null, "Replayed job should have no lease_expires_at");
+            Debug.Assert(replayedJob.RunAfter == null, "Replayed job should have no run_after");
+        }
+
+        // 16. Replay on non-dead-lettered job fails
+        private async Task ReplayNonDeadLetterJobFailsTest()
+        {
+            var type = UniqueType("replay_fail");
+            var jobId = await postgresStore.Save(new NewJobRequest(type, "{}"));
+
+            bool threw = false;
+            try
+            {
+                await postgresStore.Replay(jobId);
+            }
+            catch (JobPersistenceException)
+            {
+                threw = true;
+            }
+            Debug.Assert(threw, "Replay on non-dead-lettered job should throw");
         }
 
 
