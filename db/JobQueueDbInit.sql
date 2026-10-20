@@ -31,3 +31,5 @@ CREATE TABLE job_attempts (
   started_at   TIMESTAMPTZ NOT NULL,
   finished_at  TIMESTAMPTZ
 );
+
+CREATE INDEX idx_job_attempts_job_id ON job_attempts(job_id);

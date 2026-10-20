@@ -1,8 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading.Tasks;
 using DistributedJobQueue.Core.Domain;
 using DistributedJobQueue.Core.Persistence;
+using DistributedJobQueueBrokerService.Metrics;
 using Microsoft.AspNetCore.Mvc;
 
 namespace DistributedJobQueueBrokerService.Controllers
@@ -26,6 +28,7 @@ namespace DistributedJobQueueBrokerService.Controllers
             try
             {
                 var id = await _jobStore.Save(request);
+                JobQueueMetrics.JobsQueued.WithLabels(request.Type).Inc();
                 return Ok(id);
             }
             catch (Exception ex)
@@ -43,6 +46,10 @@ namespace DistributedJobQueueBrokerService.Controllers
             {
                 var lease = await _jobStore.Lease(request.WorkerId, request.AllowedTypes ?? new List<string>(), TimeSpan.FromSeconds(request.LeaseSeconds));
                 if (lease == null) return NoContent();
+
+                // Track running job
+                JobQueueMetrics.JobsRunning.WithLabels(lease.Type).Inc();
+
                 return Ok(lease);
             }
             catch (Exception ex)
@@ -59,6 +66,8 @@ namespace DistributedJobQueueBrokerService.Controllers
             try
             {
                 var id = await _jobStore.Ack(request.JobId, request.WorkerId, request.ResultUrl);
+                JobQueueMetrics.JobsSucceeded.Inc();
+                JobQueueMetrics.JobsRunning.WithLabels(request.WorkerId).Dec();
                 return Ok(id);
             }
             catch (Exception ex)
@@ -75,6 +84,8 @@ namespace DistributedJobQueueBrokerService.Controllers
             try
             {
                 var id = await _jobStore.Nack(request.JobId, request.WorkerId, request.Error);
+                JobQueueMetrics.JobsDeadLettered.Inc();
+                JobQueueMetrics.JobsRunning.WithLabels(request.WorkerId).Dec();
                 return Ok(id);
             }
             catch (Exception ex)
@@ -143,6 +154,24 @@ namespace DistributedJobQueueBrokerService.Controllers
 
                 await _jobStore.Replay(id);
                 return Ok(id);
+            }
+            catch (Exception ex)
+            {
+                return Problem(detail: ex.Message);
+            }
+        }
+
+        // GET api/jobs/{id}/attempts
+        [HttpGet("{id}/attempts")]
+        public async Task<ActionResult<List<JobAttempt>>> GetAttempts(Guid id)
+        {
+            try
+            {
+                var job = await _jobStore.GetJob(id);
+                if (job == null) return NotFound();
+
+                var attempts = await _jobStore.GetAttempts(id);
+                return Ok(attempts);
             }
             catch (Exception ex)
             {

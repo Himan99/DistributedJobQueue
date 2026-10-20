@@ -104,7 +104,7 @@ await Run("EndToEndLeaseProcessAck", async () =>
 
     using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Warning));
     var heartbeat = new HeartbeatService(store, "e2e-worker", TimeSpan.FromSeconds(10), loggerFactory.CreateLogger<HeartbeatService>());
-    var worker = new WorkerLoop(store, registry, heartbeat, "e2e-worker", new[] { type }, 1, 10, 500);
+    var worker = new WorkerLoop(store, registry, heartbeat, loggerFactory.CreateLogger<WorkerLoop>(), "e2e-worker", new[] { type }, 1, 10, 500, 10);
     var loop = worker.StartAsync(new CancellationTokenSource(TimeSpan.FromSeconds(20)).Token);
 
     var job = await WaitForStatus(jobId, JobStatus.Succeeded);
@@ -129,7 +129,7 @@ await Run("WorkerRespectsAllowedTypes", async () =>
 
     using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Warning));
     var heartbeat = new HeartbeatService(store, "filter-worker", TimeSpan.FromSeconds(10), loggerFactory.CreateLogger<HeartbeatService>());
-    var worker = new WorkerLoop(store, registry, heartbeat, "filter-worker", new[] { allowedType }, 1, 10, 300);
+    var worker = new WorkerLoop(store, registry, heartbeat, loggerFactory.CreateLogger<WorkerLoop>(), "filter-worker", new[] { allowedType }, 1, 10, 300, 10);
     var loop = worker.StartAsync(new CancellationTokenSource(TimeSpan.FromSeconds(15)).Token);
 
     var allowed = await WaitForStatus(allowedId, JobStatus.Succeeded);
@@ -140,6 +140,40 @@ await Run("WorkerRespectsAllowedTypes", async () =>
         throw new Exception("Allowed-type job was not processed by the worker");
     if (blocked?.Status != JobStatus.Queued)
         throw new Exception($"Blocked-type job was leased despite not being in ALLOWED_TYPES (status={blocked?.Status})");
+});
+
+// 8. WorkerLoop graceful shutdown waits for in-flight jobs
+await Run("WorkerLoopGracefulShutdownTest", async () =>
+{
+    var type = $"shutdown_{Guid.NewGuid():N}";
+    var jobId = await store.Save(new NewJobRequest(type, "{}", MaxRetries: 3));
+
+    var registry = new HandlerRegistry();
+    // Use SlowHandler to simulate a job that takes time (1500ms)
+    registry.Register(type, Handlers.SlowHandler(1500));
+
+    using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Warning));
+    var heartbeat = new HeartbeatService(store, "shutdown-worker", TimeSpan.FromSeconds(10), loggerFactory.CreateLogger<HeartbeatService>());
+    // shutdownTimeoutSeconds = 10, pollIntervalMs = 500
+    var worker = new WorkerLoop(store, registry, heartbeat, loggerFactory.CreateLogger<WorkerLoop>(), "shutdown-worker", new[] { type }, 1, 30, 500, 10);
+
+    var cts = new CancellationTokenSource();
+    var loop = worker.StartAsync(cts.Token);
+
+    // Wait a bit for the job to be leased and start processing
+    await Task.Delay(2000);
+
+    // Now request shutdown - it should wait for the slow job to complete (up to timeout)
+    var stopTask = worker.StopAsync(CancellationToken.None);
+
+    // The slow handler takes ~1.5 seconds, and we gave it a 10 second shutdown timeout
+    await stopTask;
+
+    var job = await store.GetJob(jobId);
+    if (job == null || job.Status != JobStatus.Succeeded)
+        throw new Exception($"Expected job to succeed after graceful shutdown, got status={job?.Status} error={job?.LastError}");
+
+    try { await loop; } catch (OperationCanceledException) { }
 });
 
 Console.WriteLine($"\n{passed} passed, {failed} failed out of {passed + failed}");

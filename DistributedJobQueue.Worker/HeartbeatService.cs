@@ -33,6 +33,8 @@ public sealed class HeartbeatService
                 break;
             }
 
+            if (cancellationToken.IsCancellationRequested) break;
+
             try
             {
                 await _store.HeartBeat(jobId, _workerId, _interval + TimeSpan.FromSeconds(5));

@@ -62,6 +62,8 @@ namespace DistributedJobQueueConsoleTester
     ("ReplayNonDeadLetterJobFailsTest", ReplayNonDeadLetterJobFailsTest),
     ("NackExponentialBackoffTest", NackExponentialBackoffTest),
     ("NackBackoffHasJitterTest", NackBackoffHasJitterTest),
+    ("AckSetsFinishedAtTest", AckSetsFinishedAtTest),
+    ("GetAttemptsReturnsAuditTrailTest", GetAttemptsReturnsAuditTrailTest),
             };
 
             int passed = 0, failed = 0;
@@ -485,6 +487,82 @@ namespace DistributedJobQueueConsoleTester
                 threw = true;
             }
             Debug.Assert(threw, "Replay on non-dead-lettered job should throw");
+        }
+
+        // 17. Ack sets finished_at on job_attempts
+        private async Task AckSetsFinishedAtTest()
+        {
+            var type = UniqueType("ack_finished_at");
+            var jobId = await postgresStore.Save(new NewJobRequest(type, "{}", MaxRetries: 3));
+            var leased = await postgresStore.Lease("worker-A", new List<string> { type }, TimeSpan.FromSeconds(30));
+            Debug.Assert(leased != null);
+
+            await postgresStore.Ack(jobId, "worker-A", "file://result.pdf");
+
+            var attempts = await postgresStore.GetAttempts(jobId);
+            Debug.Assert(attempts != null && attempts.Count == 1, "Expected exactly 1 attempt record");
+            var attempt = attempts[0];
+            Debug.Assert(attempt.FinishedAt != null, "finished_at should be set after Ack");
+            Debug.Assert(attempt.Outcome == "succeeded", "Attempt outcome should be succeeded");
+        }
+
+        // 18. GetAttempts returns audit trail with all attempt records
+        private async Task GetAttemptsReturnsAuditTrailTest()
+        {
+            var type = UniqueType("get_attempts_audit");
+            var jobId = await postgresStore.Save(new NewJobRequest(type, "{}", MaxRetries: 5));
+
+            // First attempt - Nack (retry)
+            var leased1 = await postgresStore.Lease("worker-A", new List<string> { type }, TimeSpan.FromSeconds(30));
+            Debug.Assert(leased1 != null);
+            await postgresStore.Nack(jobId, "worker-A", "failure #1");
+
+            // Wait for backoff to elapse - poll for lease (max backoff for attempt 1 = 2^1 + 5s jitter = 7s)
+            LeasedJob? leased2 = null;
+            for (int i = 0; i < 15; i++)
+            {
+                await Task.Delay(1000);
+                leased2 = await postgresStore.Lease("worker-B", new List<string> { type }, TimeSpan.FromSeconds(30));
+                if (leased2 != null) break;
+            }
+            Debug.Assert(leased2 != null, "Expected job leasable after first backoff elapsed");
+
+            // Second attempt - Nack (retry)
+            await postgresStore.Nack(leased2.JobId, "worker-B", "failure #2");
+
+            // Wait for second backoff - poll for lease (max backoff for attempt 2 = 2^2 + 5s jitter = 9s)
+            LeasedJob? leased3 = null;
+            for (int i = 0; i < 20; i++)
+            {
+                await Task.Delay(1000);
+                leased3 = await postgresStore.Lease("worker-C", new List<string> { type }, TimeSpan.FromSeconds(30));
+                if (leased3 != null) break;
+            }
+            Debug.Assert(leased3 != null, "Expected job leasable after second backoff elapsed");
+
+            // Third attempt - Ack (success)
+            await postgresStore.Ack(leased3.JobId, "worker-C", "file://result.pdf");
+
+            // Now get attempts - should have 3 records
+            var attempts = await postgresStore.GetAttempts(jobId);
+            Debug.Assert(attempts != null && attempts.Count == 3, $"Expected 3 attempt records, got {attempts?.Count}");
+
+            // First attempt: failed, finished_at set
+            var attempt1 = attempts.OrderBy(a => a.StartedAt).First();
+            Debug.Assert(attempt1.Outcome == "failed", "First attempt outcome should be failed");
+            Debug.Assert(attempt1.FinishedAt != null, "First attempt should have finished_at after Nack");
+            Debug.Assert(attempt1.Error == "failure #1", "First attempt should have error recorded");
+
+            // Second attempt: failed, finished_at set
+            var attempt2 = attempts.OrderBy(a => a.StartedAt).Skip(1).First();
+            Debug.Assert(attempt2.Outcome == "failed", "Second attempt outcome should be failed");
+            Debug.Assert(attempt2.FinishedAt != null, "Second attempt should have finished_at after Nack");
+            Debug.Assert(attempt2.Error == "failure #2", "Second attempt should have error recorded");
+
+            // Third attempt: succeeded, finished_at set
+            var attempt3 = attempts.OrderBy(a => a.StartedAt).Last();
+            Debug.Assert(attempt3.Outcome == "succeeded", "Third attempt outcome should be succeeded");
+            Debug.Assert(attempt3.FinishedAt != null, "Third attempt should have finished_at after Ack");
         }
 
 

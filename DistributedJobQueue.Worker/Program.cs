@@ -26,6 +26,7 @@ var poolSize = int.Parse(Environment.GetEnvironmentVariable("POOL_SIZE") ?? "5")
 var leaseSeconds = int.Parse(Environment.GetEnvironmentVariable("LEASE_SECONDS") ?? "30");
 var pollIntervalMs = int.Parse(Environment.GetEnvironmentVariable("POLL_INTERVAL") ?? "2000");
 var heartbeatIntervalSec = int.Parse(Environment.GetEnvironmentVariable("HEARTBEAT_INTERVAL") ?? "10");
+var shutdownTimeoutSeconds = int.Parse(Environment.GetEnvironmentVariable("SHUTDOWN_TIMEOUT_SECONDS") ?? "60");
 
 builder.Services.AddSingleton(sp => new HeartbeatService(
     sp.GetRequiredService<IJobStore>(),
@@ -37,11 +38,13 @@ builder.Services.AddSingleton(sp => new WorkerLoop(
     sp.GetRequiredService<IJobStore>(),
     sp.GetRequiredService<HandlerRegistry>(),
     sp.GetRequiredService<HeartbeatService>(),
+    sp.GetRequiredService<ILogger<WorkerLoop>>(),
     $"worker-{Guid.NewGuid():N}",
     allowedTypes,
     poolSize,
     leaseSeconds,
-    pollIntervalMs));
+    pollIntervalMs,
+    shutdownTimeoutSeconds));
 builder.Services.AddHostedService<WorkerLoop>();
 
 using var host = builder.Build();

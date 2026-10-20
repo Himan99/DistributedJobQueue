@@ -40,7 +40,7 @@ namespace DistributedJobQueue.Core.Persistence
         public async Task<Guid> Ack(Guid jobId, string workerId, string resultUrl)
         {
             const string sql = @"
-            UPDATE jobs SET status = @SuccessStatus, result_url = @ResultUrl
+            UPDATE jobs SET status = @SuccessStatus, result_url = @ResultUrl, finished_at = now()
             WHERE id = @JobId AND leased_by = @WorkerId
             RETURNING id;";
 
@@ -80,6 +80,7 @@ namespace DistributedJobQueue.Core.Persistence
                 last_error = @Error,
                 leased_by = NULL,
                 lease_expires_at = NULL,
+                finished_at = CASE WHEN attempts + 1 >= max_retries THEN now() ELSE finished_at END,
                 run_after = CASE
                                 WHEN attempts + 1 >= max_retries THEN run_after
                                 ELSE now() + (LEAST(POWER(2, attempts), 60::double precision) + random() * 5) * interval '1 second'
@@ -323,6 +324,29 @@ namespace DistributedJobQueue.Core.Persistence
                     return existingId ?? throw new JobPersistenceException("Idempotency conflict but existing row not found");
                 }
             }, "Insert");
+        }
+
+        public async Task<List<JobAttempt>> GetAttempts(Guid jobId)
+        {
+            const string sql = @"
+            SELECT
+                id AS ""Id"",
+                job_id AS ""JobId"",
+                attempt_num AS ""AttemptNum"",
+                worker_id AS ""WorkerId"",
+                outcome AS ""Outcome"",
+                error AS ""Error"",
+                started_at AS ""StartedAt"",
+                finished_at AS ""FinishedAt""
+            FROM job_attempts
+            WHERE job_id = @JobId
+            ORDER BY attempt_num ASC";
+
+            return await WithDbHandlingAsync<List<JobAttempt>>(async conn =>
+            {
+                var result = await conn.QueryAsync<JobAttempt>(sql, new { JobId = jobId });
+                return result.AsList();
+            }, "GetAttempts");
         }
     }
 }

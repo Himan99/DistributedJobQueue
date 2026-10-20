@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\BrokerService\DistributedJobQueue.Core.csproj" />
+    <ProjectReference Include="..\DistributedJobQueue.Api\DistributedJobQueue.Api.csproj" />
   </ItemGroup>
 
   <ItemGroup>
