@@ -60,6 +60,8 @@ namespace DistributedJobQueueConsoleTester
     ("ListJobsFiltersByTypeTest", ListJobsFiltersByTypeTest),
     ("ReplayDeadLetterJobTest", ReplayDeadLetterJobTest),
     ("ReplayNonDeadLetterJobFailsTest", ReplayNonDeadLetterJobFailsTest),
+    ("NackExponentialBackoffTest", NackExponentialBackoffTest),
+    ("NackBackoffHasJitterTest", NackBackoffHasJitterTest),
             };
 
             int passed = 0, failed = 0;
@@ -149,18 +151,102 @@ namespace DistributedJobQueueConsoleTester
             var type = UniqueType("nack_dlq");
             var jobId = await postgresStore.Save(new NewJobRequest(type, "{}", MaxRetries: 2));
 
-            for (int i = 0; i < 2; i++)
-            {
-                // each loop: lease will fail if run_after backoff hasn't elapsed — see note above,
-                // this test assumes a short/no backoff for test purposes, or direct row manipulation.
-                var leased = await postgresStore.Lease($"worker-{i}", new List<string> { type }, TimeSpan.FromSeconds(30));
-                Debug.Assert(leased != null, $"Expected job leasable on loop {i}");
-                await postgresStore.Nack(jobId, $"worker-{i}", $"failure #{i}");
-                await Task.Delay(1000);
-            }
+            // First nack: attempts 0→1, job queued with exponential backoff (~1-5s with jitter)
+            var leased1 = await postgresStore.Lease("worker-A", new List<string> { type }, TimeSpan.FromSeconds(30));
+            Debug.Assert(leased1 != null, "Expected job leasable on first loop");
+            await postgresStore.Nack(jobId, "worker-A", "failure #1");
 
-            var finalAttempt = await postgresStore.Lease("worker-final", new List<string> { type }, TimeSpan.FromSeconds(30));
-            Debug.Assert(finalAttempt == null, "Job was still leasable after exhausting max_retries — should be DeadLettered");
+            var afterFirst = await postgresStore.GetJob(jobId);
+            Debug.Assert(afterFirst != null, "GetJob returned null after first nack");
+            Debug.Assert(afterFirst!.Attempts == 1, $"Expected attempts=1 after first nack, got {afterFirst.Attempts}");
+            Debug.Assert(afterFirst.Status == JobStatus.Queued, "Job should be queued after first nack");
+            Debug.Assert(afterFirst.RunAfter != null, "Job should have run_after set after first nack");
+            Debug.Assert(afterFirst.RunAfter!.Value > DateTime.UtcNow, "run_after should be in the future");
+
+            // Wait for backoff to elapse (max ~5s base+jitter for attempt 1, plus buffer)
+            await Task.Delay(7000);
+
+            // Second nack: attempts 1→2 >= max_retries(2) -> dead_lettered
+            var leased2 = await postgresStore.Lease("worker-B", new List<string> { type }, TimeSpan.FromSeconds(30));
+            Debug.Assert(leased2 != null, "Expected job leasable after backoff elapsed");
+            await postgresStore.Nack(jobId, "worker-B", "failure #2");
+
+            var afterSecond = await postgresStore.GetJob(jobId);
+            Debug.Assert(afterSecond != null, "GetJob returned null after second nack");
+            Debug.Assert(afterSecond!.Attempts == 2, $"Expected attempts=2 after second nack, got {afterSecond.Attempts}");
+            Debug.Assert(afterSecond.Status == JobStatus.DeadLettered, "Job should be dead-lettered after exhausting max_retries");
+
+            // confirm it stays dead — no further reclaim possible
+            var lease3 = await postgresStore.Lease("worker-C", new List<string> { type }, TimeSpan.FromSeconds(30));
+            Debug.Assert(lease3 == null, "Dead-lettered job was reclaimed again");
+        }
+
+        // 17. Nack applies exponential backoff with jitter — first retry short, second longer
+        private async Task NackExponentialBackoffTest()
+        {
+            var type = UniqueType("nack_backoff");
+            var jobId = await postgresStore.Save(new NewJobRequest(type, "{}", MaxRetries: 5));
+
+            // First nack: attempts 0→1, backoff = min(2^0, 60) + jitter(0-5) ≈ 1-5s
+            var leased1 = await postgresStore.Lease("worker-A", new List<string> { type }, TimeSpan.FromSeconds(30));
+            Debug.Assert(leased1 != null, "Expected job leasable");
+            await postgresStore.Nack(jobId, "worker-A", "failure #1");
+
+            var job1 = await postgresStore.GetJob(jobId);
+            Debug.Assert(job1 != null && job1.Attempts == 1, "Expected attempts=1 after first nack");
+            Debug.Assert(job1.RunAfter != null, "First nack should set run_after");
+            var backoff1 = job1.RunAfter!.Value - DateTime.UtcNow;
+            Debug.Assert(backoff1.TotalSeconds >= 0.5 && backoff1.TotalSeconds <= 7,
+                $"First retry backoff should be ~1-5s, got {backoff1.TotalSeconds}s");
+
+            // Wait for first backoff to elapse, polling the lease until the job is re-leasable.
+            // Max backoff for attempt 1 = 2^0 + 5s jitter = 6s; poll for up to 15s to absorb clock skew.
+            LeasedJob? leased2 = null;
+            for (int i = 0; i < 15; i++)
+            {
+                await Task.Delay(1000);
+                leased2 = await postgresStore.Lease("worker-B", new List<string> { type }, TimeSpan.FromSeconds(30));
+                if (leased2 != null) break;
+            }
+            Debug.Assert(leased2 != null, "Expected job leasable after first backoff elapsed");
+            // Nack the job that was actually leased (leased_by is set by Lease; using saved jobId would fail
+            // because the first Nack cleared leased_by on the original job).
+            await postgresStore.Nack(leased2.JobId, "worker-B", "failure #2");
+
+            var job2 = await postgresStore.GetJob(leased2.JobId);
+            Debug.Assert(job2 != null, "GetJob returned null after second nack");
+            Debug.Assert(job2.Attempts >= 1, $"Expected attempts>=1 after second nack, got {job2.Attempts}");
+            Debug.Assert(job2.RunAfter != null, "Second nack should set run_after");
+            var backoff2 = job2.RunAfter!.Value - DateTime.UtcNow;
+            Debug.Assert(backoff2.TotalSeconds >= 0.5 && backoff2.TotalSeconds <= 67,
+                $"Second retry backoff should be ~1-65s, got {backoff2.TotalSeconds}s");
+        }
+
+        // 18. Nack backoff varies due to jitter — two jobs with same attempt get different run_after
+        private async Task NackBackoffHasJitterTest()
+        {
+            var type = UniqueType("nack_jitter");
+            var jobId1 = await postgresStore.Save(new NewJobRequest(type, "{}", MaxRetries: 5));
+            var jobId2 = await postgresStore.Save(new NewJobRequest(type, "{}", MaxRetries: 5));
+
+            var leased1 = await postgresStore.Lease("worker-A", new List<string> { type }, TimeSpan.FromSeconds(30));
+            var leased2 = await postgresStore.Lease("worker-B", new List<string> { type }, TimeSpan.FromSeconds(30));
+            Debug.Assert(leased1 != null && leased2 != null, "Both jobs should be leasable");
+
+            await postgresStore.Nack(jobId1, "worker-A", "failure #1");
+            await postgresStore.Nack(jobId2, "worker-B", "failure #1");
+
+            var job1 = await postgresStore.GetJob(jobId1);
+            var job2 = await postgresStore.GetJob(jobId2);
+            Debug.Assert(job1 != null && job2 != null, "Both jobs should exist");
+            Debug.Assert(job1!.RunAfter != null && job2!.RunAfter != null, "Both jobs should have run_after");
+
+            var runAfter1 = job1.RunAfter!.Value;
+            var runAfter2 = job2.RunAfter!.Value;
+            // Both should be in the near future (~1-5s) but not identical due to jitter
+            Debug.Assert(runAfter1 > DateTime.UtcNow && runAfter2 > DateTime.UtcNow, "Both run_after should be in the future");
+            Debug.Assert(Math.Abs((runAfter1 - runAfter2).TotalSeconds) > 0.1,
+                $"Jitter should cause different run_after values, got {runAfter1} and {runAfter2}");
         }
 
         // 5. Visibility: job leased once is not leasable again while lease is valid (existing test, kept)

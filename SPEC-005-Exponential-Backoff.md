@@ -2,7 +2,7 @@
 
 **ID:** SPEC-005  
 **Title:** Exponential backoff with jitter on Nack retry  
-**Status:** Not started  
+**Status:** Implemented  
 **Type:** Enhancement  
 **Architecture ref:** Section 3 — `run_after = now() + backoff(attempts)  # e.g. exponential + jitter`
 

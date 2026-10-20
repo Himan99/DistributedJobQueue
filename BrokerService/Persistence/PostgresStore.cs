@@ -73,7 +73,7 @@ namespace DistributedJobQueue.Core.Persistence
                 lease_expires_at = NULL,
                 run_after = CASE
                                 WHEN attempts + 1 >= max_retries THEN run_after
-                                ELSE now() + interval '1 seconds'
+                                ELSE now() + (LEAST(POWER(2, attempts), 60::double precision) + random() * 5) * interval '1 second'
                             END
             WHERE id = @JobId AND leased_by = @WorkerId
             RETURNING id AS ""JobId"";
