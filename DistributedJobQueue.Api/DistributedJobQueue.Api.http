@@ -1,0 +1,6 @@
+@DistributedJobQueue.Api_HostAddress = http://localhost:5033
+
+GET {{DistributedJobQueue.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

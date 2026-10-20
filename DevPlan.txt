@@ -1,0 +1,34 @@
+Phase 0 — Setup (30 min)
+
+Pick your language now (I'd suggest whatever you're strongest in — Python or C#/.NET both work fine, C# also doubles as portfolio-relevant since it's your daily stack).
+docker-compose.yml with just Postgres. Confirm you can connect from your host.
+Create the jobs table manually via a migration file (write the SQL yourself from the spec doc).
+
+Phase 1 — Broker core, no networking yet (build as a library first)
+Goal: get SKIP LOCKED correctness working before wrapping it in HTTP.
+
+Write enqueue(type, payload) — direct DB insert function.
+Write lease(allowed_types, lease_seconds) — the SKIP LOCKED query.
+Test this manually: open two psql sessions or two script instances, enqueue 5 jobs, call lease() from both "workers" rapidly, confirm no job is ever double-leased. This is the single most important thing to verify with your own eyes before moving on — don't skip it.
+Write heartbeat(), ack(), nack() (with retry/backoff/DLQ logic) as plain functions too.
+Write a quick script that: enqueues a job, leases it, waits past lease expiry without acking, confirms lease() from elsewhere picks it up again. This proves your expiry logic works.
+
+Phase 2 — Wrap broker in HTTP
+
+Thin REST layer over the functions from Phase 1 (Flask/FastAPI or ASP.NET minimal API — whatever's fastest for you, this part is low-learning-value glue code).
+Test with curl/Postman manually, one endpoint at a time.
+
+Phase 3 — Worker, single-threaded first
+
+No thread pool yet. Just: lease → run one of 3 dummy handlers (print + sleep) → ack/nack. Get this looping correctly against the real broker API before adding concurrency — isolates bugs.
+Add a deliberately-flaky handler (fails 50% of the time) and watch it retry and eventually DLQ over several runs.
+
+Phase 4 — Concurrency
+
+Add the thread pool. Now run 3+ worker processes simultaneously via docker compose --scale.
+Fire 20+ jobs at once, watch logs across workers, confirm no duplicate execution under normal conditions and correct re-lease behavior if you kill a worker mid-job (docker kill one container mid-run — this is a great real test of your lease/heartbeat design).
+
+Phase 5 — Pool isolation + DLQ replay
+
+Split into fast/batch pools via env var filtering.
+Build the DLQ list + replay endpoint, test end to end.

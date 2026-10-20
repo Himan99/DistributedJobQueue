@@ -1,0 +1,22 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.cache
+
+# Local settings
+.claude/
+
+# Local configuration overrides
+appsettings.*.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Publish output
+publish/
