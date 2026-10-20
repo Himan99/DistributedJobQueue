@@ -86,8 +86,8 @@ If any test fails, do not merge to master. Fix the issues and re-test.
 | SPEC-002 | Comment/Code Mismatch | Implemented |
 | SPEC-003 | Get / List Jobs | Implemented |
 | SPEC-004 | DLQ Replay | Implemented |
-| SPEC-005 | Exponential Backoff | Not started |
-| SPEC-006 | Worker Service | Not started |
+| SPEC-005 | Exponential Backoff | Implemented |
+| SPEC-006 | Worker Service | Implemented |
 | SPEC-007 | Worker Heartbeat Thread | Not started |
 | SPEC-008 | Job Attempts Audit Writes | Not started |
 | SPEC-009 | Pool Isolation (Fast/Batch) | Not started |

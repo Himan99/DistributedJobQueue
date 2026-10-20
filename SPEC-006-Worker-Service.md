@@ -2,7 +2,7 @@
 
 **ID:** SPEC-006  
 **Title:** Worker service with thread pool and handler registry  
-**Status:** Not started  
+**Status:** Implemented  
 **Type:** New service  
 **Architecture ref:** Section 5 — Worker loop, ThreadPoolExecutor, handler registry
 
