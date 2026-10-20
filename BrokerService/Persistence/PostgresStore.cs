@@ -55,6 +55,15 @@ namespace DistributedJobQueue.Core.Persistence
             return await WithDbHandlingAsync<Guid>(async conn =>
             {
                 var result = await conn.ExecuteScalarAsync<Guid?>(sql, parameters);
+                if (result != null)
+                {
+                    // Update audit record: mark attempt as succeeded
+                    const string auditSql = @"
+                        UPDATE job_attempts
+                        SET outcome = 'succeeded', finished_at = now()
+                        WHERE job_id = @JobId AND worker_id = @WorkerId AND outcome = 'running'";
+                    await conn.ExecuteAsync(auditSql, new { JobId = jobId, WorkerId = workerId });
+                }
                 return result ?? throw new JobPersistenceException("Ack failed: no id returned");
             }, "Ack");
         }
@@ -91,6 +100,15 @@ namespace DistributedJobQueue.Core.Persistence
             return await WithDbHandlingAsync<Guid>(async conn =>
             {
                 var result = await conn.ExecuteScalarAsync<Guid?>(sql, parameters);
+                if (result != null)
+                {
+                    // Update audit record: mark attempt as failed with error
+                    const string auditSql = @"
+                        UPDATE job_attempts
+                        SET outcome = 'failed', error = @Error, finished_at = now()
+                        WHERE job_id = @JobId AND worker_id = @WorkerId AND outcome = 'running'";
+                    await conn.ExecuteAsync(auditSql, new { JobId = jobId, WorkerId = workerId, Error = error });
+                }
                 return result ?? throw new JobPersistenceException("Nack failed: no id returned");
             }, "Nack");
         }
@@ -161,7 +179,16 @@ namespace DistributedJobQueue.Core.Persistence
 
             return await WithDbHandlingAsync<LeasedJob?>(async conn =>
             {
-                return await conn.QuerySingleOrDefaultAsync<LeasedJob?>(sql, parameters);
+                var job = await conn.QuerySingleOrDefaultAsync<LeasedJob?>(sql, parameters);
+                if (job != null)
+                {
+                    // Write audit record for the attempt start
+                    const string auditSql = @"
+                        INSERT INTO job_attempts (job_id, attempt_num, worker_id, outcome, started_at)
+                        VALUES (@JobId, @AttemptNum, @WorkerId, 'running', now())";
+                    await conn.ExecuteAsync(auditSql, new { JobId = job.JobId, AttemptNum = job.Attempt, WorkerId = workerId });
+                }
+                return job;
             }, "Lease");
         }
 

@@ -2,7 +2,7 @@
 
 **ID:** SPEC-008  
 **Title:** Write audit records to job_attempts table  
-**Status:** Not started  
+**Status:** Implemented  
 **Type:** Enhancement  
 **Architecture ref:** Section 4 — `job_attempts` table (append-only history for debugging + DLQ inspection)
 

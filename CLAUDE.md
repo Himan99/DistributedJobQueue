@@ -89,7 +89,7 @@ If any test fails, do not merge to master. Fix the issues and re-test.
 | SPEC-005 | Exponential Backoff | Implemented |
 | SPEC-006 | Worker Service | Implemented |
 | SPEC-007 | Worker Heartbeat Thread | Implemented |
-| SPEC-008 | Job Attempts Audit Writes | Not started |
+| SPEC-008 | Job Attempts Audit Writes | Implemented |
 | SPEC-009 | Pool Isolation (Fast/Batch) | Not started |
 
 ## Prerequisites
