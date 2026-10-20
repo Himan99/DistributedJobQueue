@@ -2,7 +2,7 @@
 
 **ID:** SPEC-007  
 **Title:** Worker heartbeat thread for lease extension  
-**Status:** Not started  
+**Status:** Implemented  
 **Type:** New feature within worker service  
 **Architecture ref:** Section 5 — `start_heartbeat_thread(job.id, interval=10)`
 

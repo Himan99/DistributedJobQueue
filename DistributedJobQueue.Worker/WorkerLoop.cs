@@ -1,6 +1,7 @@
 using DistributedJobQueue.Core.Domain;
 using DistributedJobQueue.Core.Persistence;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 namespace DistributedJobQueue.Worker;
 
@@ -8,6 +9,7 @@ public class WorkerLoop : IHostedService
 {
     private readonly IJobStore _store;
     private readonly HandlerRegistry _registry;
+    private readonly HeartbeatService _heartbeatService;
     private readonly string _workerId;
     private readonly List<string> _allowedTypes;
     private readonly int _poolSize;
@@ -18,6 +20,7 @@ public class WorkerLoop : IHostedService
     public WorkerLoop(
         IJobStore store,
         HandlerRegistry registry,
+        HeartbeatService heartbeatService,
         string workerId,
         string[] allowedTypes,
         int poolSize,
@@ -26,6 +29,7 @@ public class WorkerLoop : IHostedService
     {
         _store = store;
         _registry = registry;
+        _heartbeatService = heartbeatService;
         _workerId = workerId;
         _allowedTypes = allowedTypes.ToList();
         _poolSize = poolSize;
@@ -74,6 +78,9 @@ public class WorkerLoop : IHostedService
             return;
         }
 
+        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var heartbeatTask = _heartbeatService.StartAsync(job.JobId, heartbeatCts.Token);
+
         try
         {
             var result = await handler!.Invoke(job.Payload);
@@ -84,6 +91,11 @@ public class WorkerLoop : IHostedService
         {
             await _store.Nack(job.JobId, _workerId, ex.Message);
             Console.WriteLine($"Worker {_workerId} nacked job {job.JobId}: {ex.Message}");
+        }
+        finally
+        {
+            await heartbeatCts.CancelAsync();
+            try { await heartbeatTask; } catch (OperationCanceledException) { }
         }
     }
 

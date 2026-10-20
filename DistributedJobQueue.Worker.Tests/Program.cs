@@ -1,6 +1,7 @@
 using DistributedJobQueue.Core.Domain;
 using DistributedJobQueue.Core.Persistence;
 using DistributedJobQueue.Worker;
+using Microsoft.Extensions.Logging;
 
 var connectionString = Environment.GetEnvironmentVariable("JobQueueDb__ConnectionString")
     ?? "Host=localhost;Port=5432;Database=job_queue_db;Username=job_queue_user;Password=job_queue_pass";
@@ -101,7 +102,9 @@ await Run("EndToEndLeaseProcessAck", async () =>
     var registry = new HandlerRegistry();
     registry.Register(type, Handlers.SuccessHandler);
 
-    var worker = new WorkerLoop(store, registry, "e2e-worker", new[] { type }, 1, 10, 500);
+    using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Warning));
+    var heartbeat = new HeartbeatService(store, "e2e-worker", TimeSpan.FromSeconds(10), loggerFactory.CreateLogger<HeartbeatService>());
+    var worker = new WorkerLoop(store, registry, heartbeat, "e2e-worker", new[] { type }, 1, 10, 500);
     var loop = worker.StartAsync(new CancellationTokenSource(TimeSpan.FromSeconds(20)).Token);
 
     var job = await WaitForStatus(jobId, JobStatus.Succeeded);
@@ -124,7 +127,9 @@ await Run("WorkerRespectsAllowedTypes", async () =>
     var registry = new HandlerRegistry();
     registry.Register(allowedType, Handlers.SuccessHandler);
 
-    var worker = new WorkerLoop(store, registry, "filter-worker", new[] { allowedType }, 1, 10, 300);
+    using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Warning));
+    var heartbeat = new HeartbeatService(store, "filter-worker", TimeSpan.FromSeconds(10), loggerFactory.CreateLogger<HeartbeatService>());
+    var worker = new WorkerLoop(store, registry, heartbeat, "filter-worker", new[] { allowedType }, 1, 10, 300);
     var loop = worker.StartAsync(new CancellationTokenSource(TimeSpan.FromSeconds(15)).Token);
 
     var allowed = await WaitForStatus(allowedId, JobStatus.Succeeded);

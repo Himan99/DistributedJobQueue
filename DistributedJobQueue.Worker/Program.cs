@@ -3,6 +3,7 @@ using DistributedJobQueue.Worker;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -24,10 +25,18 @@ var allowedTypes = Environment.GetEnvironmentVariable("ALLOWED_TYPES")
 var poolSize = int.Parse(Environment.GetEnvironmentVariable("POOL_SIZE") ?? "5");
 var leaseSeconds = int.Parse(Environment.GetEnvironmentVariable("LEASE_SECONDS") ?? "30");
 var pollIntervalMs = int.Parse(Environment.GetEnvironmentVariable("POLL_INTERVAL") ?? "2000");
+var heartbeatIntervalSec = int.Parse(Environment.GetEnvironmentVariable("HEARTBEAT_INTERVAL") ?? "10");
+
+builder.Services.AddSingleton(sp => new HeartbeatService(
+    sp.GetRequiredService<IJobStore>(),
+    $"worker-{Guid.NewGuid():N}",
+    TimeSpan.FromSeconds(heartbeatIntervalSec),
+    sp.GetRequiredService<ILogger<HeartbeatService>>()));
 
 builder.Services.AddSingleton(sp => new WorkerLoop(
     sp.GetRequiredService<IJobStore>(),
     sp.GetRequiredService<HandlerRegistry>(),
+    sp.GetRequiredService<HeartbeatService>(),
     $"worker-{Guid.NewGuid():N}",
     allowedTypes,
     poolSize,
