@@ -2,7 +2,7 @@
 
 **ID:** SPEC-009  
 **Title:** Worker pool isolation for fast vs batch job types  
-**Status:** Not started  
+**Status:** Implemented  
 **Type:** New worker deployment configuration  
 **Architecture ref:** Section 2 (diagram), Section 5 — Fast pool vs Batch pool
 
