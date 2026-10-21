@@ -13,5 +13,6 @@ namespace DistributedJobQueue.Core.Persistence
         Task<List<Job>> ListJobs(string? status, string? type);
         Task Replay(Guid jobId);
         Task<List<JobAttempt>> GetAttempts(Guid jobId);
+        Task ClearLease(Guid jobId);
     }
 }

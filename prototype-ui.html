@@ -1,0 +1,952 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DistributedJobQueue UI Prototype</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    /* Variant indicator */
+    .variant-badge {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #1f2937;
+      color: #f3f4f6;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-family: monospace;
+      font-size: 12px;
+      z-index: 1000;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+    .variant-badge select {
+      background: #374151;
+      color: #f3f4f6;
+      border: 1px solid #4b5563;
+      padding: 4px 8px;
+      border-radius: 4px;
+      margin-left: 8px;
+      font-family: monospace;
+      font-size: 12px;
+    }
+    /* Variants */
+    .variant { display: none; }
+    .variant.active { display: block; }
+    /* Mock data styles */
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .status-queued { background: #dbeafe; color: #1e40af; }
+    .status-running { background: #fef3c7; color: #92400e; }
+    .status-succeeded { background: #d1fae5; color: #065f46; }
+    .status-dead_lettered { background: #fee2e2; color: #991b1b; }
+    .status-cancelled { background: #f3f4f6; color: #374151; }
+    .job-row:hover { background: #f9fafb; }
+    .job-row.running { background: #fffbeb; }
+    .job-row.succeeded { background: #f0fdf4; }
+    .job-row.dead_lettered { background: #fef2f2; }
+    /* Chart containers */
+    .chart-container { position: relative; height: 200px; }
+    /* Animations */
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    .animate-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #f1f1f1; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+  <!-- Variant Selector -->
+  <div class="variant-badge">
+    Variant:
+    <select id="variantSelect" onchange="switchVariant(this.value)">
+      <option value="variant-a">A - Dashboard Dense</option>
+      <option value="variant-b">B - Dashboard Spacious</option>
+      <option value="variant-c">C - Job-Centric</option>
+      <option value="variant-d">D - Metrics-Focused</option>
+    </select>
+  </div>
+
+  <!-- Mock Data Generator -->
+  <script>
+    // Generate mock job data
+    function generateMockJobs(count = 50) {
+      const types = ['email.send', 'sms.send', 'report.generate', 'pdf.render', 'batch.process', 'webhook.deliver', 'image.resize', 'video.transcode'];
+      const statuses = ['queued', 'running', 'succeeded', 'dead_lettered'];
+      const workers = ['worker-1', 'worker-2', 'worker-3', 'worker-fast-1', 'worker-batch-1', null];
+      const jobs = [];
+      const now = Date.now();
+
+      for (let i = 0; i < count; i++) {
+        const status = statuses[Math.floor(Math.random() * statuses.length)];
+        const createdAt = now - Math.random() * 3600000; // last hour
+        const startedAt = status !== 'queued' ? createdAt + Math.random() * 30000 : null;
+        const finishedAt = (status === 'succeeded' || status === 'dead_lettered') ? startedAt + Math.random() * 120000 : null;
+        const attempt = status === 'queued' ? 0 : Math.floor(Math.random() * 3) + 1;
+        const maxAttempts = 3;
+
+        jobs.push({
+          id: `job-${String(i+1).padStart(4, '0')}`,
+          type: types[Math.floor(Math.random() * types.length)],
+          status,
+          payload: { key: `value-${i}`, data: Math.random() },
+          priority: Math.floor(Math.random() * 10),
+          worker: status === 'running' ? workers[Math.floor(Math.random() * (workers.length - 1))] : null,
+          attempt,
+          maxAttempts,
+          leaseExpiresAt: status === 'running' ? now + Math.random() * 300000 : null,
+          createdAt,
+          startedAt,
+          finishedAt,
+          error: status === 'dead_lettered' ? 'Handler threw: Connection timeout after 30s' : null,
+          idempotencyKey: Math.random() > 0.7 ? `idem-${Math.random().toString(36).substr(2, 9)}` : null
+        });
+      }
+      return jobs.sort((a, b) => b.createdAt - a.createdAt);
+    }
+
+    function generateMockWorkers() {
+      return [
+        { id: 'worker-1', pool: 'default', status: 'healthy', inFlight: 3, capacity: 10, lastHeartbeat: Date.now() - 5000, startedAt: Date.now() - 3600000 },
+        { id: 'worker-2', pool: 'default', status: 'healthy', inFlight: 2, capacity: 10, lastHeartbeat: Date.now() - 2000, startedAt: Date.now() - 3600000 },
+        { id: 'worker-3', pool: 'default', status: 'unhealthy', inFlight: 0, capacity: 10, lastHeartbeat: Date.now() - 60000, startedAt: Date.now() - 3600000 },
+        { id: 'worker-fast-1', pool: 'fast', status: 'healthy', inFlight: 5, capacity: 20, lastHeartbeat: Date.now() - 1000, startedAt: Date.now() - 1800000 },
+        { id: 'worker-batch-1', pool: 'batch', status: 'healthy', inFlight: 1, capacity: 5, lastHeartbeat: Date.now() - 3000, startedAt: Date.now() - 1800000 },
+      ];
+    }
+
+    function generateMockMetrics() {
+      const points = 60;
+      const now = Date.now();
+      return {
+        throughput: Array.from({ length: points }, (_, i) => ({
+          t: now - (points - i) * 60000,
+          y: Math.floor(Math.random() * 50) + 10
+        })),
+        latency: Array.from({ length: points }, (_, i) => ({
+          t: now - (points - i) * 60000,
+          y: Math.floor(Math.random() * 200) + 50
+        })),
+        queueDepth: Array.from({ length: points }, (_, i) => ({
+          t: now - (points - i) * 60000,
+          y: Math.floor(Math.random() * 100)
+        })),
+        retryRate: Array.from({ length: points }, (_, i) => ({
+          t: now - (points - i) * 60000,
+          y: Math.random() * 0.3
+        }))
+      };
+    }
+
+    const mockJobs = generateMockJobs(50);
+    const mockWorkers = generateMockWorkers();
+    const mockMetrics = generateMockMetrics();
+
+    // Expose for variant rendering
+    window.mockData = { jobs: mockJobs, workers: mockWorkers, metrics: mockMetrics };
+  </script>
+
+  <!-- VARIANT A: Dashboard Dense - Information dense, table-first -->
+  <div id="variant-a" class="variant active">
+    <div class="p-4 md:p-6">
+      <!-- Header -->
+      <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
+        <div>
+          <h1 class="text-2xl font-bold text-gray-900">DistributedJobQueue Dashboard</h1>
+          <p class="text-gray-500 text-sm mt-1">Real-time job queue monitoring & control</p>
+        </div>
+        <div class="flex gap-2">
+          <button class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium" onclick="dispatchBatch()">Dispatch Batch</button>
+          <button class="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-sm font-medium" onclick="refreshData()">Refresh</button>
+          <select id="pollInterval" class="px-3 py-2 border border-gray-300 rounded-lg text-sm" onchange="setPollInterval(this.value)">
+            <option value="500">500ms (Active)</option>
+            <option value="2000" selected>2s (Normal)</option>
+            <option value="5000">5s (Idle)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Status Cards Row -->
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-gray-500">Queued</span>
+            <span class="text-2xl font-bold text-blue-600" id="stat-queued">0</span>
+          </div>
+          <div class="mt-1 text-xs text-gray-400" id="stat-queued-trend">+12% vs 5min ago</div>
+        </div>
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-gray-500">Running</span>
+            <span class="text-2xl font-bold text-amber-600" id="stat-running">0</span>
+          </div>
+          <div class="mt-1 text-xs text-gray-400" id="stat-running-trend">3 workers active</div>
+        </div>
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-gray-500">Succeeded</span>
+            <span class="text-2xl font-bold text-green-600" id="stat-succeeded">0</span>
+          </div>
+          <div class="mt-1 text-xs text-gray-400" id="stat-succeeded-trend">45/min avg</div>
+        </div>
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+          <div class="flex items-center justify-between">
+            <span class="text-sm text-gray-500">Dead Lettered</span>
+            <span class="text-2xl font-bold text-red-600" id="stat-dead">0</span>
+          </div>
+          <div class="mt-1 text-xs text-gray-400" id="stat-dead-trend">2 in last hour</div>
+        </div>
+      </div>
+
+      <!-- Main Content: Job Table (Left) + Worker Panel + Charts (Right) -->
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
+        <!-- Job Table - 8 cols -->
+        <div class="lg:col-span-8 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div class="px-4 py-3 border-b border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <h2 class="font-semibold text-gray-900">Jobs</h2>
+            <div class="flex gap-2">
+              <select id="statusFilter" class="px-3 py-1.5 border border-gray-300 rounded-lg text-sm" onchange="filterJobs()">
+                <option value="">All Statuses</option>
+                <option value="queued">Queued</option>
+                <option value="running">Running</option>
+                <option value="succeeded">Succeeded</option>
+                <option value="dead_lettered">Dead Lettered</option>
+              </select>
+              <input type="text" id="searchInput" placeholder="Search job ID, type..." class="px-3 py-1.5 border border-gray-300 rounded-lg text-sm w-48" oninput="filterJobs()">
+            </div>
+          </div>
+          <div class="overflow-x-auto max-h-[600px]">
+            <table class="w-full text-sm" id="jobsTable">
+              <thead class="bg-gray-50 sticky top-0">
+                <tr>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Worker</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Attempt</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Lease Expires</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="jobsTableBody" class="divide-y divide-gray-100">
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Right Panel: Workers + Charts - 4 cols -->
+        <div class="lg:col-span-4 space-y-4">
+          <!-- Worker Panel -->
+          <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <h3 class="font-semibold text-gray-900 mb-3 flex items-center justify-between">
+              Workers
+              <span class="text-xs text-gray-400" id="workerCount">5</span>
+            </h3>
+            <div class="space-y-2" id="workerList">
+            </div>
+          </div>
+
+          <!-- Mini Charts -->
+          <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <h3 class="font-semibold text-gray-900 mb-3">Throughput (jobs/min)</h3>
+            <div class="chart-container">
+              <canvas id="throughputChart"></canvas>
+            </div>
+          </div>
+          <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <h3 class="font-semibold text-gray-900 mb-3">Latency (ms)</h3>
+            <div class="chart-container">
+              <canvas id="latencyChart"></canvas>
+            </div>
+          </div>
+          <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <h3 class="font-semibold text-gray-900 mb-3">Queue Depth</h3>
+            <div class="chart-container">
+              <canvas id="queueDepthChart"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Attempt History Modal (hidden by default) -->
+      <div id="attemptModal" class="fixed inset-0 bg-black/50 hidden z-50 flex items-center justify-center p-4">
+        <div class="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[80vh] overflow-hidden">
+          <div class="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+            <h3 class="font-semibold text-gray-900" id="modalJobTitle">Attempt History</h3>
+            <button onclick="closeModal()" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+          </div>
+          <div class="p-4 overflow-y-auto max-h-[60vh]" id="attemptHistoryContent">
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- VARIANT B: Dashboard Spacious - More breathing room, card-based -->
+  <div id="variant-b" class="variant">
+    <div class="p-6 md:p-8">
+      <div class="max-w-7xl mx-auto">
+        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-8">
+          <div>
+            <h1 class="text-3xl font-bold text-gray-900">DistributedJobQueue</h1>
+            <p class="text-gray-500 mt-1">Monitor and control your distributed job queue</p>
+          </div>
+          <div class="flex gap-3">
+            <button class="px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 font-medium" onclick="dispatchBatch()">Dispatch Test Batch</button>
+          </div>
+        </div>
+
+        <!-- Status Cards - Larger -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+          <StatusCard title="Queued" value="0" id="stat-queued-b" icon="📋" color="blue" trend="+12%"/>
+          <StatusCard title="Running" value="0" id="stat-running-b" icon="⚡" color="amber" trend="3 active"/>
+          <StatusCard title="Succeeded" value="0" id="stat-succeeded-b" icon="✅" color="green" trend="45/min"/>
+          <StatusCard title="Dead Lettered" value="0" id="stat-dead-b" icon="💀" color="red" trend="2/hour"/>
+        </div>
+
+        <!-- Two Column Layout -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <!-- Jobs Card -->
+          <div class="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+            <div class="px-6 py-4 border-b border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <h2 class="text-lg font-semibold text-gray-900">Job Queue</h2>
+              <div class="flex gap-2">
+                <select id="statusFilterB" class="px-3 py-2 border border-gray-300 rounded-xl text-sm" onchange="filterJobsB()">
+                  <option value="">All Statuses</option>
+                  <option value="queued">Queued</option>
+                  <option value="running">Running</option>
+                  <option value="succeeded">Succeeded</option>
+                  <option value="dead_lettered">Dead Lettered</option>
+                </select>
+                <input type="text" id="searchInputB" placeholder="Search..." class="px-4 py-2 border border-gray-300 rounded-xl text-sm w-56" oninput="filterJobsB()">
+              </div>
+            </div>
+            <div class="overflow-x-auto max-h-[500px]">
+              <table class="w-full text-sm" id="jobsTableB">
+                <thead class="bg-gray-50 sticky top-0">
+                  <tr>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Job ID</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Worker</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Attempt</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="jobsTableBodyB" class="divide-y divide-gray-100">
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Worker + Metrics Card -->
+          <div class="space-y-6">
+            <div class="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">
+              <h3 class="text-lg font-semibold text-gray-900 mb-4 flex items-center justify-between">
+                Workers <span class="text-sm text-gray-400" id="workerCountB">5</span>
+              </h3>
+              <div class="space-y-3" id="workerListB">
+              </div>
+            </div>
+            <div class="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">
+              <h3 class="text-lg font-semibold text-gray-900 mb-4">Live Metrics</h3>
+              <div class="grid grid-cols-2 gap-4">
+                <div class="chart-container" style="height: 180px;"><canvas id="throughputChartB"></canvas></div>
+                <div class="chart-container" style="height: 180px;"><canvas id="latencyChartB"></canvas></div>
+              </div>
+              <div class="grid grid-cols-2 gap-4 mt-4">
+                <div class="chart-container" style="height: 180px;"><canvas id="queueDepthChartB"></canvas></div>
+                <div class="chart-container" style="height: 180px;"><canvas id="retryRateChartB"></canvas></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- VARIANT C: Job-Centric - Full width job table, collapsible details -->
+  <div id="variant-c" class="variant">
+    <div class="p-4 md:p-6">
+      <div class="max-w-full mx-auto">
+        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
+          <div>
+            <h1 class="text-2xl font-bold text-gray-900">Job Queue</h1>
+            <p class="text-gray-500 text-sm">All jobs with inline attempt history</p>
+          </div>
+          <button class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium" onclick="dispatchBatch()">Dispatch Batch</button>
+        </div>
+
+        <!-- Compact Stats Bar -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          <StatPill label="Queued" value="0" id="stat-queued-c" color="blue"/>
+          <StatPill label="Running" value="0" id="stat-running-c" color="amber"/>
+          <StatPill label="Succeeded" value="0" id="stat-succeeded-c" color="green"/>
+          <StatPill label="Dead" value="0" id="stat-dead-c" color="red"/>
+        </div>
+
+        <!-- Full Width Job Table with Expandable Rows -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div class="px-4 py-3 border-b border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <h2 class="font-semibold text-gray-900">All Jobs (click row to expand attempts)</h2>
+            <div class="flex gap-2 flex-wrap">
+              <select id="statusFilterC" class="px-3 py-1.5 border border-gray-300 rounded-lg text-sm" onchange="filterJobsC()">
+                <option value="">All</option>
+                <option value="queued">Queued</option>
+                <option value="running">Running</option>
+                <option value="succeeded">Succeeded</option>
+                <option value="dead_lettered">Dead Lettered</option>
+              </select>
+              <input type="text" id="searchInputC" placeholder="Search..." class="px-3 py-1.5 border border-gray-300 rounded-lg text-sm w-48" oninput="filterJobsC()">
+              <select id="typeFilterC" class="px-3 py-1.5 border border-gray-300 rounded-lg text-sm" onchange="filterJobsC()">
+                <option value="">All Types</option>
+              </select>
+            </div>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm" id="jobsTableC">
+              <thead class="bg-gray-50 sticky top-0">
+                <tr>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-10">⌄</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Worker</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Attempt</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Lease</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-32">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="jobsTableBodyC" class="divide-y divide-gray-100">
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- VARIANT D: Metrics-Focused - Charts first, jobs secondary -->
+  <div id="variant-d" class="variant">
+    <div class="p-4 md:p-6">
+      <div class="max-w-7xl mx-auto">
+        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
+          <div>
+            <h1 class="text-2xl font-bold text-gray-900">Queue Metrics</h1>
+            <p class="text-gray-500 text-sm">Performance & health overview</p>
+          </div>
+          <button class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium" onclick="dispatchBatch()">Dispatch Batch</button>
+        </div>
+
+        <!-- Large Charts Grid -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+          <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <h3 class="font-semibold text-gray-900 mb-3">Throughput (jobs/min)</h3>
+            <div class="chart-container" style="height: 280px;"><canvas id="throughputChartD"></canvas></div>
+          </div>
+          <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <h3 class="font-semibold text-gray-900 mb-3">End-to-End Latency (ms)</h3>
+            <div class="chart-container" style="height: 280px;"><canvas id="latencyChartD"></canvas></div>
+          </div>
+          <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <h3 class="font-semibold text-gray-900 mb-3">Queue Depth Over Time</h3>
+            <div class="chart-container" style="height: 280px;"><canvas id="queueDepthChartD"></canvas></div>
+          </div>
+          <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <h3 class="font-semibold text-gray-900 mb-3">Retry Rate & Error Rate</h3>
+            <div class="chart-container" style="height: 280px;"><canvas id="retryRateChartD"></canvas></div>
+          </div>
+        </div>
+
+        <!-- Summary Stats Row -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+          <StatPill label="Queued" value="0" id="stat-queued-d" color="blue"/>
+          <StatPill label="Running" value="0" id="stat-running-d" color="amber"/>
+          <StatPill label="Succeeded/min" value="0" id="stat-succeeded-d" color="green"/>
+          <StatPill label="Error Rate" value="0%" id="stat-error-d" color="red"/>
+        </div>
+
+        <!-- Compact Job Table at Bottom -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div class="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+            <h2 class="font-semibold text-gray-900">Recent Jobs</h2>
+            <span class="text-sm text-gray-500" id="jobCountD">50 jobs</span>
+          </div>
+          <div class="overflow-x-auto max-h-96">
+            <table class="w-full text-xs" id="jobsTableD">
+              <thead class="bg-gray-50 sticky top-0">
+                <tr>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Worker</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Attempt</th>
+                  <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Duration</th>
+                </tr>
+              </thead>
+              <tbody id="jobsTableBodyD" class="divide-y divide-gray-100">
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ============ UTILITY FUNCTIONS ============
+    function formatTime(ts) {
+      if (!ts) return '—';
+      const d = new Date(ts);
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+    function formatDuration(ms) {
+      if (!ms) return '—';
+      if (ms < 1000) return `${ms}ms`;
+      if (ms < 60000) return `${(ms/1000).toFixed(1)}s`;
+      return `${Math.floor(ms/60000)}m ${Math.floor((ms%60000)/1000)}s`;
+    }
+    function formatRelative(ts) {
+      if (!ts) return '—';
+      const diff = Date.now() - ts;
+      if (diff < 60000) return `${Math.floor(diff/1000)}s ago`;
+      if (diff < 3600000) return `${Math.floor(diff/60000)}m ago`;
+      return `${Math.floor(diff/3600000)}h ago`;
+    }
+
+    function getStatusBadge(status) {
+      const labels = { queued: 'Queued', running: 'Running', succeeded: 'Succeeded', dead_lettered: 'Dead Lettered', cancelled: 'Cancelled' };
+      return `<span class="status-badge status-${status}">${labels[status] || status}</span>`;
+    }
+
+    function renderActionButtons(job) {
+      const buttons = [];
+      if (job.status === 'queued') {
+        buttons.push(`<button onclick="cancelJob('${job.id}')" class="px-2 py-1 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200">Cancel</button>`);
+      }
+      if (job.status === 'running') {
+        buttons.push(`<button onclick="abortJob('${job.id}')" class="px-2 py-1 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200">Abort</button>`);
+        buttons.push(`<button onclick="simulateCrash('${job.id}')" class="px-2 py-1 text-xs bg-amber-100 text-amber-700 rounded hover:bg-amber-200 ml-1">Sim Crash</button>`);
+      }
+      if (job.status === 'dead_lettered') {
+        buttons.push(`<button onclick="replayJob('${job.id}')" class="px-2 py-1 text-xs bg-green-100 text-green-700 rounded hover:bg-green-200">Replay</button>`);
+      }
+      buttons.push(`<button onclick="showAttempts('${job.id}')" class="px-2 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200 ml-1">Attempts</button>`);
+      return buttons.join('');
+    }
+
+    // ============ VARIANT SWITCHING ============
+    function switchVariant(variantId) {
+      document.querySelectorAll('.variant').forEach(v => v.classList.remove('active'));
+      document.getElementById(variantId).classList.add('active');
+      renderAllVariants();
+    }
+
+    // ============ RENDERING FUNCTIONS ============
+    function renderAllVariants() {
+      renderVariantA();
+      renderVariantB();
+      renderVariantC();
+      renderVariantD();
+      initCharts();
+    }
+
+    // Variant A - Dashboard Dense
+    function renderVariantA() {
+      const { jobs, workers, metrics } = window.mockData;
+      updateStats('stat-queued', 'stat-running', 'stat-succeeded', 'stat-dead', jobs);
+      renderJobsTable('jobsTableBody', jobs);
+      renderWorkerList('workerList', workers);
+    }
+
+    // Variant B - Dashboard Spacious
+    function renderVariantB() {
+      const { jobs, workers } = window.mockData;
+      updateStats('stat-queued-b', 'stat-running-b', 'stat-succeeded-b', 'stat-dead-b', jobs);
+      renderJobsTable('jobsTableBodyB', jobs);
+      renderWorkerList('workerListB', workers);
+    }
+
+    // Variant C - Job-Centric
+    function renderVariantC() {
+      const { jobs, workers } = window.mockData;
+      updateStats('stat-queued-c', 'stat-running-c', 'stat-succeeded-c', 'stat-dead-c', jobs);
+      renderJobsTableExpandable('jobsTableBodyC', jobs);
+      populateTypeFilter('typeFilterC', jobs);
+    }
+
+    // Variant D - Metrics-Focused
+    function renderVariantD() {
+      const { jobs } = window.mockData;
+      updateStats('stat-queued-d', 'stat-running-d', 'stat-succeeded-d', 'stat-error-d', jobs);
+      renderJobsTable('jobsTableBodyD', jobs.slice(0, 20));
+      document.getElementById('jobCountD').textContent = `${jobs.length} jobs`;
+    }
+
+    function updateStats(queuedId, runningId, succeededId, deadId, jobs) {
+      const counts = { queued: 0, running: 0, succeeded: 0, dead_lettered: 0 };
+      jobs.forEach(j => counts[j.status]++);
+      document.getElementById(queuedId).textContent = counts.queued;
+      document.getElementById(runningId).textContent = counts.running;
+      document.getElementById(succeededId).textContent = counts.succeeded;
+      document.getElementById(deadId).textContent = counts.dead_lettered;
+    }
+
+    function renderJobsTable(tbodyId, jobs) {
+      const tbody = document.getElementById(tbodyId);
+      if (!tbody) return;
+      const filter = getActiveFilter();
+      const filtered = jobs.filter(j => !filter.status || j.status === filter.status)
+                         .filter(j => !filter.search || j.id.includes(filter.search) || j.type.includes(filter.search));
+
+      tbody.innerHTML = filtered.map(job => `
+        <tr class="job-row ${job.status}">
+          <td class="px-3 py-2 font-mono text-gray-600">${job.id}</td>
+          <td class="px-3 py-2"><span class="px-2 py-0.5 bg-gray-100 rounded text-xs">${job.type}</span></td>
+          <td class="px-3 py-2">${getStatusBadge(job.status)}</td>
+          <td class="px-3 py-2 font-mono text-sm text-gray-600">${job.worker || '—'}</td>
+          <td class="px-3 py-2 text-center">${job.attempt}/${job.maxAttempts}</td>
+          <td class="px-3 py-2 text-sm text-gray-500">${job.leaseExpiresAt ? formatRelative(job.leaseExpiresAt) : '—'}</td>
+          <td class="px-3 py-2 text-sm text-gray-500">${formatRelative(job.createdAt)}</td>
+          <td class="px-3 py-2">${renderActionButtons(job)}</td>
+        </tr>
+      `).join('');
+    }
+
+    function renderJobsTableExpandable(tbodyId, jobs) {
+      const tbody = document.getElementById(tbodyId);
+      if (!tbody) return;
+      const filter = getActiveFilter('C');
+      const filtered = jobs.filter(j => !filter.status || j.status === filter.status)
+                         .filter(j => !filter.search || j.id.includes(filter.search) || j.type.includes(filter.search))
+                         .filter(j => !filter.type || j.type === filter.type);
+
+      tbody.innerHTML = filtered.map(job => `
+        <tr class="job-row ${job.status} cursor-pointer" onclick="toggleExpand('${job.id}')">
+          <td class="px-3 py-2 text-center text-gray-400 hover:text-gray-600">▼</td>
+          <td class="px-3 py-2 font-mono text-gray-600">${job.id}</td>
+          <td class="px-3 py-2"><span class="px-2 py-0.5 bg-gray-100 rounded text-xs">${job.type}</span></td>
+          <td class="px-3 py-2">${getStatusBadge(job.status)}</td>
+          <td class="px-3 py-2 font-mono text-sm text-gray-600">${job.worker || '—'}</td>
+          <td class="px-3 py-2 text-center">${job.attempt}/${job.maxAttempts}</td>
+          <td class="px-3 py-2 text-sm text-gray-500">${job.leaseExpiresAt ? formatRelative(job.leaseExpiresAt) : '—'}</td>
+          <td class="px-3 py-2 text-sm text-gray-500">${formatRelative(job.createdAt)}</td>
+          <td class="px-3 py-2">${renderActionButtons(job)}</td>
+        </tr>
+        <tr id="expand-${job.id}" class="hidden bg-gray-50">
+          <td colspan="9" class="px-6 py-4">
+            <div class="bg-white rounded-lg border border-gray-200 p-4">
+              <h4 class="font-medium text-gray-900 mb-2">Attempt History</h4>
+              ${generateAttemptHistory(job).map(a => `
+                <div class="flex items-start gap-3 py-2 border-b border-gray-100 last:border-0">
+                  <span class="text-xs text-gray-400 w-20 shrink-0">${a.attempt}/${job.maxAttempts}</span>
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2 text-sm">
+                      <span class="status-badge status-${a.outcome}">${a.outcome}</span>
+                      <span class="text-gray-500">${formatDuration(a.duration)}</span>
+                      <span class="text-gray-400">${formatTime(a.startedAt)}</span>
+                    </div>
+                    ${a.error ? `<div class="text-xs text-red-600 mt-1 font-mono bg-red-50 p-2 rounded">${a.error}</div>` : ''}
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    function generateAttemptHistory(job) {
+      const attempts = [];
+      for (let i = 1; i <= job.attempt; i++) {
+        const isLast = i === job.attempt;
+        const outcome = isLast ? job.status : (Math.random() > 0.5 ? 'failed' : 'failed');
+        const startedAt = job.createdAt + (i - 1) * 60000 + Math.random() * 30000;
+        const duration = Math.floor(Math.random() * 120000) + 10000;
+        attempts.push({
+          attempt: i,
+          outcome: isLast && job.status === 'succeeded' ? 'succeeded' : (isLast ? job.status : 'failed'),
+          startedAt,
+          duration,
+          error: outcome === 'failed' || outcome === 'dead_lettered' ? 'Handler error: ' + (job.error || 'Timeout') : null
+        });
+      }
+      return attempts;
+    }
+
+    function renderWorkerList(containerId, workers) {
+      const container = document.getElementById(containerId);
+      if (!container) return;
+      container.innerHTML = workers.map(w => `
+        <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+          <div class="flex items-center gap-3">
+            <span class="w-2 h-2 rounded-full ${w.status === 'healthy' ? 'bg-green-500' : 'bg-red-500'}"></span>
+            <div>
+              <div class="font-mono text-sm font-medium text-gray-900">${w.id}</div>
+              <div class="text-xs text-gray-500">Pool: ${w.pool} • ${w.inFlight}/${w.capacity} slots</div>
+            </div>
+          </div>
+          <div class="text-right">
+            <div class="text-xs text-gray-500">Last seen</div>
+            <div class="text-xs font-mono text-gray-900">${formatRelative(w.lastHeartbeat)}</div>
+          </div>
+        </div>
+      `).join('');
+      const countEl = document.getElementById(containerId.replace('List', 'Count').replace('workerList', 'workerCount'));
+      if (countEl) countEl.textContent = `${workers.filter(w => w.status === 'healthy').length}/${workers.length} healthy`;
+    }
+
+    function populateTypeFilter(selectId, jobs) {
+      const select = document.getElementById(selectId);
+      if (!select) return;
+      const types = [...new Set(jobs.map(j => j.type))].sort();
+      select.innerHTML = '<option value="">All Types</option>' + types.map(t => `<option value="${t}">${t}</option>`).join('');
+    }
+
+    function getActiveFilter(suffix = '') {
+      const statusEl = document.getElementById(`statusFilter${suffix}`);
+      const searchEl = document.getElementById(`searchInput${suffix}`);
+      const typeEl = document.getElementById(`typeFilter${suffix}`);
+      return {
+        status: statusEl ? statusEl.value : '',
+        search: searchEl ? searchEl.value.toLowerCase() : '',
+        type: typeEl ? typeEl.value : ''
+      };
+    }
+
+    function filterJobs() { renderVariantA(); }
+    function filterJobsB() { renderVariantB(); }
+    function filterJobsC() { renderVariantC(); }
+
+    function toggleExpand(jobId) {
+      const row = document.getElementById(`expand-${jobId}`);
+      const icon = row.previousElementSibling.querySelector('td:first-child');
+      if (row.classList.contains('hidden')) {
+        row.classList.remove('hidden');
+        if (icon) icon.textContent = '▲';
+      } else {
+        row.classList.add('hidden');
+        if (icon) icon.textContent = '▼';
+      }
+    }
+
+    function showAttempts(jobId) {
+      const job = window.mockData.jobs.find(j => j.id === jobId);
+      if (!job) return;
+      document.getElementById('modalJobTitle').textContent = `Attempt History: ${job.id}`;
+      const content = document.getElementById('attemptHistoryContent');
+      content.innerHTML = generateAttemptHistory(job).map(a => `
+        <div class="flex items-start gap-3 py-3 border-b border-gray-100 last:border-0">
+          <span class="text-sm text-gray-400 w-16 shrink-0 font-mono">Attempt ${a.attempt}</span>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 mb-1">
+              <span class="status-badge status-${a.outcome}">${a.outcome}</span>
+              <span class="text-sm text-gray-500">${formatDuration(a.duration)}</span>
+              <span class="text-xs text-gray-400">${formatTime(a.startedAt)}</span>
+            </div>
+            ${a.error ? `<div class="text-sm text-red-600 font-mono bg-red-50 p-2 rounded">${a.error}</div>` : ''}
+          </div>
+        </div>
+      `).join('');
+      document.getElementById('attemptModal').classList.remove('hidden');
+    }
+
+    function closeModal() {
+      document.getElementById('attemptModal').classList.add('hidden');
+    }
+
+    // ============ ACTIONS ============
+    function dispatchBatch() {
+      const types = ['email.send', 'sms.send', 'report.generate', 'pdf.render', 'batch.process'];
+      const count = 20;
+      alert(`Dispatching ${count} jobs:\n${types.map(t => `  • ${Math.floor(count/types.length)}x ${t}`).join('\n')}\n\nIn real implementation, this would POST to /api/jobs/batch`);
+    }
+
+    function cancelJob(jobId) {
+      if (confirm(`Cancel queued job ${jobId}?`)) {
+        alert(`POST /api/jobs/${jobId}/cancel\n\nJob would be removed from queue.`);
+      }
+    }
+
+    function abortJob(jobId) {
+      if (confirm(`Force-abort running job ${jobId}? This marks it dead_lettered immediately.`)) {
+        alert(`POST /api/jobs/${jobId}/abort\n\nJob marked dead_lettered, worker notified.`);
+      }
+    }
+
+    function simulateCrash(jobId) {
+      if (confirm(`Simulate worker crash for ${jobId}? This clears lease/heartbeat, allowing natural re-lease.`)) {
+        alert(`POST /api/jobs/${jobId}/simulate-crash\n\nLease cleared, job returns to queued state.`);
+      }
+    }
+
+    function replayJob(jobId) {
+      if (confirm(`Replay dead-lettered job ${jobId}?`)) {
+        alert(`POST /api/jobs/${jobId}/replay\n\nJob re-queued with attempt=0.`);
+      }
+    }
+
+    function refreshData() {
+      window.mockData.jobs = generateMockJobs(50);
+      window.mockData.workers = generateMockWorkers();
+      window.mockData.metrics = generateMockMetrics();
+      renderAllVariants();
+      alert('Data refreshed! (In real app, this would fetch from API)');
+    }
+
+    function setPollInterval(ms) {
+      console.log(`Poll interval set to ${ms}ms`);
+      // In real app: update TanStack Query refetchInterval
+    }
+
+    // ============ CHART INITIALIZATION ============
+    let chartsInitialized = false;
+    function initCharts() {
+      if (chartsInitialized) return;
+      chartsInitialized = true;
+
+      const chartDefaults = {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { type: 'time', time: { displayFormats: { minute: 'HH:mm' }}, grid: { display: false }, ticks: { maxTicksLimit: 8, font: { size: 10 }}},
+          y: { beginAtZero: true, grid: { color: '#f1f5f9' }, ticks: { font: { size: 10 }}}
+        },
+        elements: { line: { tension: 0.3, borderWidth: 2 }, point: { radius: 0, hoverRadius: 4 }},
+        interaction: { intersect: false, mode: 'index' }
+      };
+
+      const colors = {
+        throughput: '#3b82f6',
+        latency: '#f59e0b',
+        queueDepth: '#8b5cf6',
+        retryRate: '#ef4444'
+      };
+
+      // Create charts for all variants
+      createChart('throughputChart', mockMetrics.throughput, colors.throughput, chartDefaults);
+      createChart('latencyChart', mockMetrics.latency, colors.latency, chartDefaults);
+      createChart('queueDepthChart', mockMetrics.queueDepth, colors.queueDepth, chartDefaults);
+      createChart('retryRateChart', mockMetrics.retryRate, colors.retryRate, { ...chartDefaults, scales: { ...chartDefaults.scales, y: { ...chartDefaults.scales.y, max: 1, tick: { callback: v => (v*100).toFixed(0) + '%' }}}});
+
+      createChart('throughputChartB', mockMetrics.throughput, colors.throughput, chartDefaults);
+      createChart('latencyChartB', mockMetrics.latency, colors.latency, chartDefaults);
+      createChart('queueDepthChartB', mockMetrics.queueDepth, colors.queueDepth, chartDefaults);
+      createChart('retryRateChartB', mockMetrics.retryRate, colors.retryRate, { ...chartDefaults, scales: { ...chartDefaults.scales, y: { ...chartDefaults.scales.y, max: 1, tick: { callback: v => (v*100).toFixed(0) + '%' }}}});
+
+      createChart('throughputChartD', mockMetrics.throughput, colors.throughput, { ...chartDefaults, scales: { ...chartDefaults.scales, x: { ...chartDefaults.scales.x, ticks: { maxTicksLimit: 10 }}}});
+      createChart('latencyChartD', mockMetrics.latency, colors.latency, { ...chartDefaults, scales: { ...chartDefaults.scales, x: { ...chartDefaults.scales.x, ticks: { maxTicksLimit: 10 }}}});
+      createChart('queueDepthChartD', mockMetrics.queueDepth, colors.queueDepth, { ...chartDefaults, scales: { ...chartDefaults.scales, x: { ...chartDefaults.scales.x, ticks: { maxTicksLimit: 10 }}}});
+      createChart('retryRateChartD', mockMetrics.retryRate, colors.retryRate, { ...chartDefaults, scales: { ...chartDefaults.scales, y: { ...chartDefaults.scales.y, max: 1, tick: { callback: v => (v*100).toFixed(0) + '%' }}, x: { ...chartDefaults.scales.x, ticks: { maxTicksLimit: 10 }}}});
+    }
+
+    function createChart(canvasId, data, color, options) {
+      const ctx = document.getElementById(canvasId);
+      if (!ctx) return;
+      new Chart(ctx, {
+        type: 'line',
+        data: {
+          datasets: [{
+            data: data,
+            borderColor: color,
+            backgroundColor: color + '20',
+            fill: true
+          }]
+        },
+        options
+      });
+    }
+
+    // Custom element for StatPill
+    class StatPill extends HTMLElement {
+      connectedCallback() {
+        const label = this.getAttribute('label');
+        const value = this.getAttribute('value');
+        const id = this.getAttribute('id');
+        const color = this.getAttribute('color');
+        const trend = this.getAttribute('trend');
+        const colors = { blue: 'bg-blue-100 text-blue-700', amber: 'bg-amber-100 text-amber-700', green: 'bg-green-100 text-green-700', red: 'bg-red-100 text-red-700' };
+        this.innerHTML = `
+          <div class="p-3 bg-white rounded-xl border border-gray-200">
+            <div class="text-xs text-gray-500">${label}</div>
+            <div class="text-2xl font-bold text-gray-900" id="${id}">${value}</div>
+            <div class="text-xs text-gray-400 mt-1">${trend}</div>
+          </div>
+        `;
+      }
+    }
+    customElements.define('stat-pill', StatPill);
+
+    // Custom element for StatusCard
+    class StatusCard extends HTMLElement {
+      connectedCallback() {
+        const title = this.getAttribute('title');
+        const value = this.getAttribute('value');
+        const id = this.getAttribute('id');
+        const icon = this.getAttribute('icon');
+        const color = this.getAttribute('color');
+        const trend = this.getAttribute('trend');
+        const colors = { blue: 'bg-blue-50 text-blue-700 border-blue-100', amber: 'bg-amber-50 text-amber-700 border-amber-100', green: 'bg-green-50 text-green-700 border-green-100', red: 'bg-red-50 text-red-700 border-red-100' };
+        const iconBg = { blue: 'bg-blue-100', amber: 'bg-amber-100', green: 'bg-green-100', red: 'bg-red-100' };
+        this.innerHTML = `
+          <div class="p-5 rounded-2xl border ${colors[color]}">
+            <div class="flex items-center justify-between">
+              <div>
+                <div class="text-sm text-gray-500">${title}</div>
+                <div class="text-3xl font-bold text-gray-900 mt-1" id="${id}">${value}</div>
+                <div class="text-xs text-gray-400 mt-1">${trend}</div>
+              </div>
+              <div class="w-12 h-12 ${iconBg[color]} rounded-xl flex items-center justify-center text-2xl">${icon}</div>
+            </div>
+          </div>
+        `;
+      }
+    }
+    customElements.define('status-card', StatusCard);
+
+    // Initialize
+    renderAllVariants();
+
+    // Simulate live updates
+    setInterval(() => {
+      // Only update if variant A is active (for demo)
+      if (document.getElementById('variant-a').classList.contains('active')) {
+        // Simulate job status changes
+        window.mockData.jobs.forEach(job => {
+          if (job.status === 'queued' && Math.random() < 0.02) {
+            job.status = 'running';
+            job.worker = window.mockData.workers.find(w => w.status === 'healthy')?.id || 'worker-1';
+            job.startedAt = Date.now();
+            job.attempt = 1;
+            job.leaseExpiresAt = Date.now() + 300000;
+          } else if (job.status === 'running' && Math.random() < 0.01) {
+            job.status = Math.random() > 0.1 ? 'succeeded' : 'dead_lettered';
+            job.worker = null;
+            job.finishedAt = Date.now();
+            job.leaseExpiresAt = null;
+            if (job.status === 'dead_lettered') job.error = 'Handler threw: Timeout';
+          }
+        });
+        // Simulate worker heartbeat
+        window.mockData.workers.forEach(w => {
+          if (w.status === 'healthy') w.lastHeartbeat = Date.now() - Math.random() * 5000;
+        });
+        renderVariantA();
+      }
+    }, 2000);
+  </script>
+</body>
+</html>

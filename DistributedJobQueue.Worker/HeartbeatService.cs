@@ -1,18 +1,17 @@
-using DistributedJobQueue.Core.Persistence;
 using Microsoft.Extensions.Logging;
 
 namespace DistributedJobQueue.Worker;
 
 public sealed class HeartbeatService
 {
-    private readonly IJobStore _store;
+    private readonly IJobQueueApiClient _apiClient;
     private readonly string _workerId;
     private readonly TimeSpan _interval;
     private readonly ILogger<HeartbeatService> _logger;
 
-    public HeartbeatService(IJobStore store, string workerId, TimeSpan interval, ILogger<HeartbeatService> logger)
+    public HeartbeatService(IJobQueueApiClient apiClient, string workerId, TimeSpan interval, ILogger<HeartbeatService> logger)
     {
-        _store = store;
+        _apiClient = apiClient;
         _workerId = workerId;
         _interval = interval;
         _logger = logger;
@@ -37,7 +36,7 @@ public sealed class HeartbeatService
 
             try
             {
-                await _store.HeartBeat(jobId, _workerId, _interval + TimeSpan.FromSeconds(5));
+                await _apiClient.HeartbeatAsync(new HeartbeatRequestDto(jobId, _workerId, (int)_interval.TotalSeconds + 5), cancellationToken);
                 _logger.LogDebug("Heartbeat sent for job {JobId}", jobId);
             }
             catch (Exception ex)

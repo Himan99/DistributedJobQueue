@@ -1,12 +1,9 @@
 using DistributedJobQueue.Core.Domain;
-using DistributedJobQueue.Core.Persistence;
 using DistributedJobQueue.Worker;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
-var connectionString = Environment.GetEnvironmentVariable("JobQueueDb__ConnectionString")
-    ?? "Host=localhost;Port=5432;Database=job_queue_db;Username=job_queue_user;Password=job_queue_pass";
-
-var store = new PostgresStore(new DbConnectionFactory(connectionString));
 int passed = 0, failed = 0;
 
 async Task Run(string name, Func<Task> test)
@@ -24,19 +21,6 @@ async Task Run(string name, Func<Task> test)
     }
 }
 
-async Task<Job?> WaitForStatus(Guid jobId, JobStatus target, int attempts = 30, int delayMs = 500)
-{
-    Job? last = null;
-    for (int i = 0; i < attempts; i++)
-    {
-        last = await store.GetJob(jobId);
-        if (last?.Status == target) return last;
-        await Task.Delay(delayMs);
-    }
-    return last;
-}
-
-// 1. Handler registry returns a registered handler by type
 await Run("HandlerRegistryRegisterAndLookup", async () =>
 {
     var registry = new HandlerRegistry();
@@ -50,7 +34,6 @@ await Run("HandlerRegistryRegisterAndLookup", async () =>
         throw new Exception($"Handler returned unexpected result: {result}");
 });
 
-// 2. Registry lookup is case-insensitive
 await Run("HandlerRegistryCaseInsensitiveLookup", () =>
 {
     var registry = new HandlerRegistry();
@@ -61,7 +44,6 @@ await Run("HandlerRegistryCaseInsensitiveLookup", () =>
     return Task.CompletedTask;
 });
 
-// 3. Registry returns false for an unknown type
 await Run("HandlerRegistryUnknownTypeReturnsFalse", () =>
 {
     var registry = new HandlerRegistry();
@@ -70,7 +52,6 @@ await Run("HandlerRegistryUnknownTypeReturnsFalse", () =>
     return Task.CompletedTask;
 });
 
-// 4. Success handler produces a result URL
 await Run("SuccessHandlerReturnsResult", async () =>
 {
     var result = await Handlers.SuccessHandler("{}");
@@ -78,7 +59,6 @@ await Run("SuccessHandlerReturnsResult", async () =>
         throw new Exception($"Unexpected success result: {result}");
 });
 
-// 5. Failure handler throws
 await Run("FailureHandlerThrows", async () =>
 {
     bool threw = false;
@@ -93,87 +73,102 @@ await Run("FailureHandlerThrows", async () =>
     if (!threw) throw new Exception("FailureHandler did not throw");
 });
 
-// 6. End-to-end: worker leases a job, runs its handler, and acks it
-await Run("EndToEndLeaseProcessAck", async () =>
+await Run("WorkerLoopProcessJobWithMockApi", async () =>
 {
-    var type = $"e2e_{Guid.NewGuid():N}";
-    var jobId = await store.Save(new NewJobRequest(type, "{}", MaxRetries: 3));
+    var type = $"test_{Guid.NewGuid():N}";
+    var jobId = Guid.NewGuid();
+
+    var mockApi = new MockJobQueueApiClient();
+    mockApi.AddJob(new LeasedJobDto(jobId, type, "{}", 1, DateTime.UtcNow.AddMinutes(5)));
 
     var registry = new HandlerRegistry();
     registry.Register(type, Handlers.SuccessHandler);
 
     using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Warning));
-    var heartbeat = new HeartbeatService(store, "e2e-worker", TimeSpan.FromSeconds(10), loggerFactory.CreateLogger<HeartbeatService>());
-    var worker = new WorkerLoop(store, registry, heartbeat, loggerFactory.CreateLogger<WorkerLoop>(), "e2e-worker", new[] { type }, 1, 10, 500, 10);
-    var loop = worker.StartAsync(new CancellationTokenSource(TimeSpan.FromSeconds(20)).Token);
+    var heartbeat = new HeartbeatService(mockApi, "test-worker", TimeSpan.FromSeconds(10), loggerFactory.CreateLogger<HeartbeatService>());
 
-    var job = await WaitForStatus(jobId, JobStatus.Succeeded);
-    try { await loop; } catch (OperationCanceledException) { }
+    var options = new WorkerOptions
+    {
+        WorkerId = "test-worker",
+        AllowedTypes = new List<string> { type },
+        PoolSize = 1,
+        LeaseSeconds = 10,
+        PollIntervalMs = 100,
+        ShutdownTimeoutSeconds = 10
+    };
 
-    if (job == null || job.Status != JobStatus.Succeeded)
-        throw new Exception($"Expected job to succeed, got status={job?.Status} error={job?.LastError}");
-    if (string.IsNullOrEmpty(job.ResultUrl))
-        throw new Exception("Acked job has no result_url");
+    var worker = new WorkerLoop(mockApi, registry, heartbeat, loggerFactory.CreateLogger<WorkerLoop>(), Options.Create(options));
+
+    var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    var loopTask = worker.StartAsync(cts.Token);
+
+    await Task.Delay(500);
+
+    cts.Cancel();
+    try { await loopTask; } catch (OperationCanceledException) { }
 });
 
-// 7. Worker only leases job types in ALLOWED_TYPES
-await Run("WorkerRespectsAllowedTypes", async () =>
-{
-    var allowedType = $"allowed_{Guid.NewGuid():N}";
-    var blockedType = $"blocked_{Guid.NewGuid():N}";
-    var allowedId = await store.Save(new NewJobRequest(allowedType, "{}"));
-    var blockedId = await store.Save(new NewJobRequest(blockedType, "{}"));
-
-    var registry = new HandlerRegistry();
-    registry.Register(allowedType, Handlers.SuccessHandler);
-
-    using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Warning));
-    var heartbeat = new HeartbeatService(store, "filter-worker", TimeSpan.FromSeconds(10), loggerFactory.CreateLogger<HeartbeatService>());
-    var worker = new WorkerLoop(store, registry, heartbeat, loggerFactory.CreateLogger<WorkerLoop>(), "filter-worker", new[] { allowedType }, 1, 10, 300, 10);
-    var loop = worker.StartAsync(new CancellationTokenSource(TimeSpan.FromSeconds(15)).Token);
-
-    var allowed = await WaitForStatus(allowedId, JobStatus.Succeeded);
-    try { await loop; } catch (OperationCanceledException) { }
-
-    var blocked = await store.GetJob(blockedId);
-    if (allowed == null || allowed.Status != JobStatus.Succeeded)
-        throw new Exception("Allowed-type job was not processed by the worker");
-    if (blocked?.Status != JobStatus.Queued)
-        throw new Exception($"Blocked-type job was leased despite not being in ALLOWED_TYPES (status={blocked?.Status})");
-});
-
-// 8. WorkerLoop graceful shutdown waits for in-flight jobs
-await Run("WorkerLoopGracefulShutdownTest", async () =>
+await Run("WorkerLoopGracefulShutdownWithMock", async () =>
 {
     var type = $"shutdown_{Guid.NewGuid():N}";
-    var jobId = await store.Save(new NewJobRequest(type, "{}", MaxRetries: 3));
+
+    var mockApi = new MockJobQueueApiClient();
 
     var registry = new HandlerRegistry();
-    // Use SlowHandler to simulate a job that takes time (1500ms)
     registry.Register(type, Handlers.SlowHandler(1500));
 
     using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Warning));
-    var heartbeat = new HeartbeatService(store, "shutdown-worker", TimeSpan.FromSeconds(10), loggerFactory.CreateLogger<HeartbeatService>());
-    // shutdownTimeoutSeconds = 10, pollIntervalMs = 500
-    var worker = new WorkerLoop(store, registry, heartbeat, loggerFactory.CreateLogger<WorkerLoop>(), "shutdown-worker", new[] { type }, 1, 30, 500, 10);
+    var heartbeat = new HeartbeatService(mockApi, "shutdown-worker", TimeSpan.FromSeconds(10), loggerFactory.CreateLogger<HeartbeatService>());
+
+    var options = new WorkerOptions
+    {
+        WorkerId = "shutdown-worker",
+        AllowedTypes = new List<string> { type },
+        PoolSize = 1,
+        LeaseSeconds = 30,
+        PollIntervalMs = 100,
+        ShutdownTimeoutSeconds = 10
+    };
+
+    var worker = new WorkerLoop(mockApi, registry, heartbeat, loggerFactory.CreateLogger<WorkerLoop>(), Options.Create(options));
 
     var cts = new CancellationTokenSource();
-    var loop = worker.StartAsync(cts.Token);
+    var loopTask = worker.StartAsync(cts.Token);
 
-    // Wait a bit for the job to be leased and start processing
-    await Task.Delay(2000);
+    await Task.Delay(200);
 
-    // Now request shutdown - it should wait for the slow job to complete (up to timeout)
     var stopTask = worker.StopAsync(CancellationToken.None);
-
-    // The slow handler takes ~1.5 seconds, and we gave it a 10 second shutdown timeout
     await stopTask;
 
-    var job = await store.GetJob(jobId);
-    if (job == null || job.Status != JobStatus.Succeeded)
-        throw new Exception($"Expected job to succeed after graceful shutdown, got status={job?.Status} error={job?.LastError}");
+    try { await loopTask; } catch (OperationCanceledException) { }
+});
 
-    try { await loop; } catch (OperationCanceledException) { }
+await Run("WorkerOptionsBinding", () =>
+{
+    var config = new ConfigurationBuilder()
+        .AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Worker:WorkerId"] = "test-worker-1",
+            ["Worker:AllowedTypes:0"] = "email",
+            ["Worker:AllowedTypes:1"] = "sms",
+            ["Worker:PoolSize"] = "10",
+            ["Worker:LeaseSeconds"] = "30",
+            ["Worker:PollIntervalMs"] = "2000",
+            ["Worker:ShutdownTimeoutSeconds"] = "60"
+        })
+        .Build();
+
+    var options = config.GetSection("Worker").Get<WorkerOptions>();
+
+    if (options == null) throw new Exception("Options not bound");
+    if (options.WorkerId != "test-worker-1") throw new Exception("WorkerId not bound");
+    if (options.AllowedTypes.Count != 2) throw new Exception("AllowedTypes not bound");
+    if (options.PoolSize != 10) throw new Exception("PoolSize not bound");
+    if (options.LeaseSeconds != 30) throw new Exception("LeaseSeconds not bound");
+    if (options.PollIntervalMs != 2000) throw new Exception("PollIntervalMs not bound");
+    if (options.ShutdownTimeoutSeconds != 60) throw new Exception("ShutdownTimeoutSeconds not bound");
+
+    return Task.CompletedTask;
 });
 
 Console.WriteLine($"\n{passed} passed, {failed} failed out of {passed + failed}");

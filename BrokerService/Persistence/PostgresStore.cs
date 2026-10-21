@@ -348,5 +348,40 @@ namespace DistributedJobQueue.Core.Persistence
                 return result.AsList();
             }, "GetAttempts");
         }
+
+        public async Task ClearLease(Guid jobId)
+        {
+            const string sql = @"
+            UPDATE jobs
+            SET leased_by = NULL,
+                lease_expires_at = NULL,
+                status = @QueuedStatus,
+                run_after = now()
+            WHERE id = @JobId
+              AND status = @RunningStatus
+            RETURNING id;";
+
+            var parameters = new
+            {
+                JobId = jobId,
+                QueuedStatus = JobStatus.Queued.ToString(),
+                RunningStatus = JobStatus.Running.ToString()
+            };
+
+            await WithDbHandlingAsync<int>(async conn =>
+            {
+                var result = await conn.ExecuteAsync(sql, parameters);
+                if (result == 0)
+                {
+                    var exists = await conn.ExecuteScalarAsync<int?>(
+                        "SELECT COUNT(*) FROM jobs WHERE id = @Id",
+                        new { Id = jobId });
+                    if (exists == 0)
+                        throw new JobPersistenceException($"Job {jobId} not found");
+                    throw new JobPersistenceException($"Job {jobId} is not in running status or already released");
+                }
+                return result;
+            }, "ClearLease");
+        }
     }
 }

@@ -179,10 +179,52 @@ namespace DistributedJobQueueBrokerService.Controllers
             }
         }
 
+        // POST api/jobs/{id}/abort
+        [HttpPost("{id}/abort")]
+        public async Task<ActionResult<Guid>> AbortJob(Guid id, [FromBody] AbortRequest request)
+        {
+            try
+            {
+                var job = await _jobStore.GetJob(id);
+                if (job == null) return NotFound();
+                if (job.Status != JobStatus.Running)
+                    return BadRequest("Job is not in running status.");
+
+                await _jobStore.Nack(jobId: id, workerId: job.LeasedBy ?? "ui", error: request.Reason ?? "Force aborted via API");
+                JobQueueMetrics.JobsDeadLettered.Inc();
+                return Ok(id);
+            }
+            catch (Exception ex)
+            {
+                return Problem(detail: ex.Message);
+            }
+        }
+
+        // POST api/jobs/{id}/simulate-crash
+        [HttpPost("{id}/simulate-crash")]
+        public async Task<ActionResult<Guid>> SimulateCrash(Guid id)
+        {
+            try
+            {
+                var job = await _jobStore.GetJob(id);
+                if (job == null) return NotFound();
+                if (job.Status != JobStatus.Running)
+                    return BadRequest("Job is not in running status.");
+
+                await _jobStore.ClearLease(id);
+                return Ok(id);
+            }
+            catch (Exception ex)
+            {
+                return Problem(detail: ex.Message);
+            }
+        }
+
         // --- Request DTOs used by the controller ---
         public record LeaseRequest(string WorkerId, List<string>? AllowedTypes, int LeaseSeconds = 30);
         public record AckRequest(Guid JobId, string WorkerId, string ResultUrl);
         public record NackRequest(Guid JobId, string WorkerId, string Error);
         public record HeartbeatRequest(Guid JobId, string WorkerId, int LeaseExtensionSeconds = 30);
+        public record AbortRequest(string? Reason);
     }
 }
