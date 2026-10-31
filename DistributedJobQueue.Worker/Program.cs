@@ -3,16 +3,25 @@ using DistributedJobQueueBrokerService.Metrics;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using Prometheus;
+using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+    });
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 // Worker configuration from environment/config
 builder.Services.Configure<WorkerOptions>(builder.Configuration.GetSection("Worker"));
+
+// Health checks - Worker uses HTTP to Main API, no DB needed
+builder.Services.AddHealthChecks()
+    .AddCheck("self", () => Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Healthy("Worker running"));
 
 // HTTP client for Main API
 builder.Services.AddHttpClient<IJobQueueApiClient, JobQueueApiClient>(client =>
@@ -22,8 +31,13 @@ builder.Services.AddHttpClient<IJobQueueApiClient, JobQueueApiClient>(client =>
     client.Timeout = TimeSpan.FromSeconds(30);
 });
 
-// Worker services
-builder.Services.AddSingleton<HandlerRegistry>();
+// Worker services - register handlers
+var handlerRegistry = new HandlerRegistry();
+handlerRegistry.Register("email", Handlers.SuccessHandler);
+handlerRegistry.Register("sms", Handlers.SuccessHandler);
+handlerRegistry.Register("report", Handlers.SuccessHandler);
+handlerRegistry.Register("ach", Handlers.SuccessHandler);
+builder.Services.AddSingleton(handlerRegistry);
 
 // HeartbeatService needs API client and worker ID
 builder.Services.AddSingleton<HeartbeatService>(sp =>
@@ -68,7 +82,7 @@ app.MapHealthChecks("/health/live", new Microsoft.AspNetCore.Diagnostics.HealthC
 });
 app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
 {
-    Predicate = check => check.Name == "postgresql"
+    Predicate = check => check.Name == "self"
 });
 
 app.MapControllers();
