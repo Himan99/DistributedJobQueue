@@ -5,6 +5,26 @@ using System.Data;
 
 namespace DistributedJobQueue.Core.Persistence
 {
+    // Internal DTO for lease query with reclaim detection
+    internal sealed class LeasedJobWithReclaim
+    {
+        public Guid JobId { get; init; }
+        public string Type { get; init; } = default!;
+        public string Payload { get; init; } = default!;
+        public int Attempt { get; init; }
+        public DateTime LeaseExpiresAt { get; init; }
+        public bool WasRunning { get; init; }
+
+        public LeasedJob ToLeasedJob() => new()
+        {
+            JobId = JobId,
+            Type = Type,
+            Payload = Payload,
+            Attempt = Attempt,
+            LeaseExpiresAt = LeaseExpiresAt
+        };
+    }
+
     public class PostgresStore : IJobStore
     {
         private readonly DbConnectionFactory dbfactory;
@@ -156,14 +176,16 @@ namespace DistributedJobQueue.Core.Persistence
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
                 )
-                RETURNING id, type, payload, attempts, lease_expires_at, status
+                RETURNING id, type, payload, attempts, lease_expires_at, status,
+                          CASE WHEN status = @RunningStatus THEN true ELSE false END AS was_running
             )
             SELECT
                 id AS ""JobId"",
                 type AS ""Type"",
                 payload AS ""Payload"",
                 attempts AS ""Attempt"",
-                lease_expires_at AS ""LeaseExpiresAt""
+                lease_expires_at AS ""LeaseExpiresAt"",
+                was_running AS ""WasRunning""
             FROM updated
             WHERE status = @RunningStatus;
             ";
@@ -180,16 +202,26 @@ namespace DistributedJobQueue.Core.Persistence
 
             return await WithDbHandlingAsync<LeasedJob?>(async conn =>
             {
-                var job = await conn.QuerySingleOrDefaultAsync<LeasedJob?>(sql, parameters);
+                var job = await conn.QuerySingleOrDefaultAsync<LeasedJobWithReclaim?>(sql, parameters);
                 if (job != null)
                 {
-                    // Write audit record for the attempt start
+                    // If this was a lease reclaim (was_running = true), close the previous attempt as timed_out
+                    if (job.WasRunning)
+                    {
+                        const string closePreviousAttemptSql = @"
+                            UPDATE job_attempts
+                            SET outcome = 'timed_out', finished_at = now()
+                            WHERE job_id = @JobId AND outcome = 'running' AND worker_id != @WorkerId";
+                        await conn.ExecuteAsync(closePreviousAttemptSql, new { JobId = job.JobId, WorkerId = workerId });
+                    }
+
+                    // Write audit record for the new attempt start
                     const string auditSql = @"
                         INSERT INTO job_attempts (job_id, attempt_num, worker_id, outcome, started_at)
                         VALUES (@JobId, @AttemptNum, @WorkerId, 'running', now())";
                     await conn.ExecuteAsync(auditSql, new { JobId = job.JobId, AttemptNum = job.Attempt, WorkerId = workerId });
                 }
-                return job;
+                return job?.ToLeasedJob();
             }, "Lease");
         }
 
